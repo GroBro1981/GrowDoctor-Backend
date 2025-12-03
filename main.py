@@ -1,128 +1,137 @@
+import os
+import io
+import base64
+import json
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
-import base64
-import json
+from PIL import Image
 
-# >>> HIER DEIN OPENAI API KEY EINTRAGEN (in Anführungszeichen lassen!) <<<
-client = OpenAI()
+# OpenAI-Client aus Umgebungsvariable
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY ist nicht gesetzt. Bitte Environment Variable setzen.")
 
-
-# OpenAI-Client initialisieren
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# FastAPI-App erstellen
-app = FastAPI()
+app = FastAPI(title="GrowDoctor Backend", version="1.0.0")
 
-# CORS erlauben (damit später deine App/Website drauf zugreifen kann)
+# CORS, damit App / Browser zugreifen können
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # für Entwicklung ok, später einschränken
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
 @app.get("/")
-def root():
-    """Einfacher Check, ob der Server läuft."""
-    return {"status": "ok", "message": "GrowDoctor läuft 😎"}
+async def root():
+    return {"status": "ok", "message": "GrowDoctor Backend läuft."}
+
+
+def image_bytes_to_data_url(image_bytes: bytes, content_type: str = "image/jpeg") -> str:
+    """Wandelt Bild-Bytes in einen data:-URL-String für OpenAI Vision um."""
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    return f"data:{content_type};base64,{b64}"
+
 
 @app.post("/diagnose")
 async def diagnose(image: UploadFile = File(...)):
-    """
-    Nimmt ein Bild (JPG/PNG) entgegen, schickt es an OpenAI
-    und gibt eine strukturierte Cannabis-Diagnose zurück.
-    """
-    # Dateityp prüfen
-    if image.content_type not in ["image/jpeg", "image/png"]:
-        raise HTTPException(status_code=400, detail="Nur JPG und PNG erlaubt.")
+    try:
+        # Bild einlesen
+        raw_bytes = await image.read()
 
-    # Bild in Base64 umwandeln
-    img_bytes = await image.read()
-    img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-    data_url = f"data:{image.content_type};base64,{img_base64}"
-
-    # Prompt: erklärt der KI, was sie tun soll und welches JSON wir wollen
-    prompt = (
-        "Du bist ein sehr erfahrener Cannabis-Pflanzenarzt. "
-        "Du bekommst ein Foto einer Pflanze (Indoor oder Outdoor). "
-        "Deine Aufgabe: Erkenne das wichtigste Problem (NUR EIN Hauptproblem auswählen), "
-        "z.B. Nährstoffmangel, Nährstoffüberschuss, Schädlingsbefall, Pilzbefall oder Umweltstress.\n\n"
-        "Wenn das Bild schlecht ist (z.B. starkes pink/violettes LED-Growlicht, extrem unscharf, zu nah gezoomt, "
-        "kaum Pflanzenteile sichtbar oder nur der Topf), dann musst du das klar sagen und die Wahrscheinlichkeit "
-        "niedrig setzen.\n\n"
-        "WICHTIG: Wenn für eine sichere Diagnose zusätzliche Fotos nötig wären, dann gib konkrete Empfehlungen ab, z.B.:\n"
-        "- \"Blattoberseite separat und scharf fotografieren\"\n"
-        "- \"Blattunterseite mit Fokus auf Flecken/Milben fotografieren\"\n"
-        "- \"Makroaufnahme der betroffenen Stelle machen (ca. 5–10 cm Abstand)\"\n"
-        "- \"Gesamte Pflanze aus etwas Entfernung fotografieren\"\n\n"
-        "Beachte folgende Foto-Regeln für gute Diagnose:\n"
-        "- Kein Bild direkt unter starkem LED-Growlicht, lieber bei neutralem Licht (Tageslicht, Blitz aus)\n"
-        "- Ganze betroffene Blätter oder Pflanzenteile zeigen, nicht nur 1 cm Ausschnitt\n"
-        "- Bild nicht verwackelt, Pflanzenstruktur erkennbar\n"
-        "- Wenn mehrere Probleme sichtbar sind, wähle das gravierendste als Hauptproblem\n\n"
-        "Antworte IMMER als gültiges JSON mit GENAU diesem Schema:\n"
-        "{"
-        "\"ist_cannabis\": true/false,"
-        "\"hauptproblem\": \"kurzer Titel des Problems\","
-        "\"kategorie\": \"mangel|überschuss|schädling|pilz|stress|unbekannt\","
-        "\"beschreibung\": \"Was ist auf dem Bild zu sehen und warum kommst du zu dieser Diagnose?\","
-        "\"wahrscheinlichkeit\": 0-100,"
-        "\"schweregrad\": \"leicht|mittel|stark\","
-        "\"stadium\": \"keimling|wachstum|blüte|egal\","
-        "\"betroffene_teile\": [\"z.B. untere_blaetter\", \"obere_triebe\"],"
-        "\"dringlichkeit\": \"niedrig|mittel|hoch|sofort_handeln\","
-        "\"empfohlene_kontrolle_in_tagen\": 0-30,"
-        "\"alternativen\": ["
-        "  {\"problem\": \"anderes mögliches Problem\", \"wahrscheinlichkeit\": 0-100}"
-        "],"
-        "\"sofort_massnahmen\": [\"konkreter Schritt 1\", \"konkreter Schritt 2\"],"
-        "\"vorbeugung\": [\"konkreter Tipp 1\", \"konkreter Tipp 2\"],"
-        "\"bildqualitaet_score\": 0-100,"
-        "\"hinweis_bildqualitaet\": \"Hinweis zur Qualität des Fotos und ggf. Verbesserungsvorschläge\","
-        "\"foto_empfehlungen\": [\"konkrete Empfehlungen für weitere Fotos (z.B. Blattunterseite, Makroaufnahme)\"]"
-        "}"
-    )
-
-    # Anfrage an OpenAI schicken (Bild + Text)
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": prompt},
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Analysiere dieses Bild und gib nur das JSON zurück."
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": data_url},
-                    },
-                ],
-            },
-        ],
-        response_format={"type": "json_object"},  # sorgt dafür, dass wirklich JSON zurückkommt
-    )
-
-    # Antwort entnehmen
-    result_text = response.choices[0].message.content
-    result = json.loads(result_text)
-
-    # 🔹 Alternativen mit Wahrscheinlichkeit < 45% ausfiltern, damit Anfänger nicht verwirrt werden
-    alternativen = result.get("alternativen") or []
-    gefiltert = []
-    for alt in alternativen:
+        # Test: ist das überhaupt ein Bild?
         try:
-            wahrscheinlichkeit = alt.get("wahrscheinlichkeit", 0)
-            if isinstance(wahrscheinlichkeit, (int, float)) and wahrscheinlichkeit >= 45:
-                gefiltert.append(alt)
+            Image.open(io.BytesIO(raw_bytes))
         except Exception:
-            # falls die KI mal Mist baut, ignorieren wir das eine Element einfach
-            continue
-    result["alternativen"] = gefiltert
+            raise HTTPException(status_code=400, detail="Die Datei ist kein gültiges Bild.")
 
-    return result
+        data_url = image_bytes_to_data_url(raw_bytes, image.content_type or "image/jpeg")
 
+        system_prompt = """
+Du bist GrowDoctor, ein spezialisierter Assistent für Cannabis-Pflanzendiagnosen.
+Du analysierst ausschließlich das Bild und gibst eine Diagnose in **sauberem JSON** zurück.
+
+ANTWORTFORMAT (sehr wichtig, NUR dieses JSON, keine Erklärtexte!):
+
+{
+  "ist_cannabis": true/false,
+  "hauptproblem": "kurzer Titel",
+  "kategorie": "mangel|überschuss|schädling|pilz|stress|unbekannt",
+  "beschreibung": "kurze Beschreibung auf Deutsch",
+  "wahrscheinlichkeit": 0-100,
+  "schweregrad": "leicht|mittel|stark",
+  "stadium": "wuchs|vorblüte|blüte|spätblüte|unbekannt",
+  "betroffene_teile": ["obere_blaetter","untere_blaetter","triebe","buds","ganze_pflanze"],
+  "dringlichkeit": "niedrig|mittel|hoch|sofort_handeln",
+  "empfohlene_kontrolle_in_tagen": 0-14,
+  "sofort_massnahmen": ["Liste von Maßnahmen"],
+  "vorbeugung": ["Liste von Tipps"],
+  "alternativen": [
+    {
+      "problem": "Name des Alternativproblems",
+      "kategorie": "mangel|überschuss|schädling|pilz|stress|unbekannt",
+      "wahrscheinlichkeit": 0-100
+    }
+  ],
+  "bildqualitaet_score": 0-100,
+  "hinweis_bildqualitaet": "kurzer Hinweis zur Qualität (Licht, Schärfe, Abstand)",
+  "foto_empfehlungen": [
+    "z.B. Blattunterseite fotografieren",
+    "Makroaufnahme der betroffenen Stelle",
+    "Foto bei natürlichem Licht ohne starke Farbstiche"
+  ]
+}
+
+WICHTIG:
+- Liste „alternativen“ NUR Probleme mit Wahrscheinlichkeit >= 45% aufnehmen.
+- Wenn du dir nicht sicher bist, setze "kategorie": "unbekannt".
+- Bleib sachlich, kurz und eindeutig.
+"""
+
+        user_content = [
+            {
+                "type": "text",
+                "text": "Analysiere dieses Bild einer Pflanze und gib NUR das JSON zurück.",
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": data_url},
+            },
+        ]
+
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            response_format={"type": "json_object"},
+        )
+
+        content = response.choices[0].message.content
+
+        try:
+            result = json.loads(content)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=500,
+                detail="Die KI-Antwort konnte nicht als JSON gelesen werden.",
+            )
+
+        # Alternativen unter 45% rausfiltern (zur Sicherheit)
+        alternativen = result.get("alternativen", [])
+        result["alternativen"] = [
+            a for a in alternativen
+            if isinstance(a, dict) and a.get("wahrscheinlichkeit", 0) >= 45
+        ]
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Interner Fehler: {e}")

@@ -2,7 +2,7 @@ import os
 import base64
 import json
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 
@@ -27,11 +27,12 @@ app = FastAPI(
 )
 
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware(
+        allow_origins=["*"],  # für Entwicklung ok, später einschränken
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 )
 
 
@@ -123,6 +124,14 @@ Du bist ein hochspezialisierter Cannabis-Ernteassistent.
 DU BEURTEILST NUR DEN REIFEGRAD DER BLÜTE ANHAND DER TRICHOME.
 Du sollst KEINE Krankheiten, keinen Schimmel und keine Nährstoffmängel diagnostizieren.
 
+Der Nutzer hat folgenden gewünschten Effekt angegeben:
+- "{desired_effect}"
+
+Interpretation:
+- "energetisch"  → eher früher ernten, mehr klare/milchige Trichome
+- "ausgeglichen" → um den klassischen optimalen Punkt herum ernten
+- "couchlock"    → etwas später ernten, mehr bernsteinfarbene Trichome
+
 Du bekommst ein MAKRO-Foto von Trichomen auf einer Cannabis-Blüte.
 
 WICHTIG:
@@ -184,14 +193,14 @@ ANTWORTE IMMER als gültiges JSON mit GENAU DIESEM SCHEMA:
 
 
 # --------------------------------------------------
-# 🧠 Hilfsfunktion: OpenAI-Call (gpt-5.1-mini)
+# 🧠 Hilfsfunktion: OpenAI-Call (gpt-4.1-mini oder gpt-5.1-mini)
 # --------------------------------------------------
 
 
 def _call_openai_json(system_prompt: str, data_url: str, user_text: str) -> dict:
     try:
         response = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-4.1-mini",  # oder "gpt-5.1-mini", wenn freigeschaltet
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
@@ -229,18 +238,19 @@ def _call_openai_json(system_prompt: str, data_url: str, user_text: str) -> dict
 
 
 # --------------------------------------------------
-# 📸 ENDPOINT 1: Allgemeine Diagnose
+# 📸 ENDPOINT 1: Einzelfoto – Allgemeine Diagnose
 # --------------------------------------------------
 
 
 @app.post("/diagnose")
 async def diagnose(image: UploadFile = File(...)):
     """
-    Erkennt Probleme wie Mängel, Schädlinge, Stress etc.
+    Erkennt Probleme wie Mängel, Schädlinge, Stress etc. anhand EINES Bildes.
     """
 
-    if image.content_type not in ("image/jpeg", "image/png"):
-        raise HTTPException(status_code=400, detail="Nur JPG und PNG sind erlaubt.")
+    if not (image.content_type and image.content_type.startswith("image/")):
+        raise HTTPException(status_code=400, detail="Nur Bilddateien sind erlaubt.")
+
 
     img_bytes = await image.read()
     img_base64 = base64.b64encode(img_bytes).decode("utf-8")
@@ -252,6 +262,7 @@ async def diagnose(image: UploadFile = File(...)):
         "Analysiere dieses Bild der Cannabis-Pflanze und gib nur das JSON im Schema zurück.",
     )
 
+    # Alternativen filtern: alles < 45 % raus
     alternativen = result.get("alternativen") or []
     gefiltert = []
     for alt in alternativen:
@@ -267,29 +278,80 @@ async def diagnose(image: UploadFile = File(...)):
 
 
 # --------------------------------------------------
-# 🌼 ENDPOINT 2: Reifegrad / Trichome
+# 📸📸 ENDPOINT 2: Multi-Foto-Diagnose (Pro)
+# --------------------------------------------------
+
+
+@app.post("/diagnose_multi")
+async def diagnose_multi(images: list[UploadFile] = File(...)):
+    """
+    Nimmt mehrere Bilder entgegen und gibt pro Bild eine Diagnose + einfache Zusammenfassung zurück.
+    """
+
+    if not (image.content_type and image.content_type.startswith("image/")):
+        raise HTTPException(status_code=400, detail="Nur Bilddateien sind erlaubt.")
+
+
+    results = []
+    for idx, image in enumerate(images):
+        if image.content_type not in ("image/jpeg", "image/png"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Nur JPG/PNG erlaubt (Bild {idx + 1}).",
+            )
+
+        img_bytes = await image.read()
+        img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+        data_url = f"data:{image.content_type};base64,{img_base64}"
+
+        res = _call_openai_json(
+            DIAGNOSIS_PROMPT,
+            data_url,
+            f"Analysiere dieses Bild {idx + 1} einer Cannabis-Pflanze und gib nur das JSON im Schema zurück.",
+        )
+        results.append(res)
+
+    # einfache Zusammenfassung (z.B. häufigstes Hauptproblem)
+    summary = {
+        "anzahl_bilder": len(results),
+        "hauptprobleme": [r.get("hauptproblem") for r in results],
+    }
+
+    return {"summary": summary, "einzel_diagnosen": results}
+
+
+# --------------------------------------------------
+# 🌼 ENDPOINT 3: Reifegrad / Trichome mit gewünschter Wirkung
 # --------------------------------------------------
 
 
 @app.post("/ripeness")
-async def ripeness(image: UploadFile = File(...)):
+async def ripeness(
+    image: UploadFile = File(...),
+    desired_effect: str = Form("ausgeglichen"),
+):
     """
     Bewertet NUR den Reifegrad der Blüte anhand der Trichome.
+    Berücksichtigt die gewünschte Wirkung: energetisch | ausgeglichen | couchlock
     """
 
-    if image.content_type not in ("image/jpeg", "image/png"):
-        raise HTTPException(status_code=400, detail="Nur JPG und PNG sind erlaubt.")
+    if not (image.content_type and image.content_type.startswith("image/")):
+        raise HTTPException(status_code=400, detail="Nur Bilddateien sind erlaubt.")
+
 
     img_bytes = await image.read()
     img_base64 = base64.b64encode(img_bytes).decode("utf-8")
     data_url = f"data:{image.content_type};base64,{img_base64}"
 
+    prompt_with_target = RIPENESS_PROMPT.format(desired_effect=desired_effect)
+
     result = _call_openai_json(
-        RIPENESS_PROMPT,
+        prompt_with_target,
         data_url,
         "Analysiere NUR den Reifegrad der Blüte anhand der Trichome.",
     )
 
+    # Sanity-Checks & Defaults
     stage = result.get("reifegrad_stufe")
     if not isinstance(stage, str) or not stage.strip():
         stage = "zu früh"
@@ -330,4 +392,3 @@ async def ripeness(image: UploadFile = File(...)):
     result["trichom_anteile"] = safe_ta
 
     return result
-

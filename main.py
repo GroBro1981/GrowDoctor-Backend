@@ -2,7 +2,7 @@ import os
 import base64
 import json
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 
@@ -28,7 +28,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # für Entwicklung ok, später einschränken
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -61,7 +61,7 @@ WICHTIG – Unterschied zwischen TRICHOMEN und SCHIMMEL:
 - Trichome:
   - kleine, glitzernde Harzdrüsen (wie Frost / Kristalle)
   - sitzen dicht auf Blüten und Zuckerblättern
-  - wirken wie viele kleine Punkte oder Pilz-Stiele mit Köpfen
+  - wirken wie viele kleine Punkte oder Pilzstiele mit Köpfen
   - können weiß, milchig oder bernsteinfarben sein
   - können auf Fotos wie „zuckerig bestäubt“ oder wie Mehltau wirken, sind aber NORMAL
 
@@ -83,8 +83,8 @@ REGEL:
 Bildqualität:
 - Wenn das Bild extrem unscharf ist oder nur ein winziger Ausschnitt gezeigt wird,
   darfst du die Bildqualität kritisieren und eine niedrige Wahrscheinlichkeit setzen.
-- Wenn Pflanze / Blätter / Blüten aber gut erkennbar sind, behandle die Bildqualität als ausreichend.
-  Erwähne dann höchstens kurz Verbesserungsvorschläge.
+- Wenn Pflanze / Blätter / Blüten aber gut erkennbar sind, behandle die Bildqualität als ausreichend
+  und gib eine normale Diagnose.
 
 Wenn du wirklich kein klares Problem erkennen kannst:
 - Setze als Hauptproblem z.B. „kein akutes Problem erkennbar“
@@ -138,11 +138,11 @@ Deine Aufgaben:
    - Anteil KLAR (%) 0–100
    - Anteil MILCHIG (%) 0–100
    - Anteil BERNSTEIN (%) 0–100
-   Die Summe darf ungefähr 100 % ergeben, muss aber nicht perfekt sein.
+   Die Summe darf ungefähr 100 % ergeben.
 
 2. Bestimme eine Reifegrad-Stufe:
    - "zu früh"    → überwiegend klare Trichome
-   - "optimal"    → überwiegend milchige Trichome, etwas Bernstein je nach gewünschter Wirkung
+   - "optimal"    → überwiegend milchige Trichome
    - "spät"       → sehr viele bernsteinfarbene Trichome
 
 3. Empfohlene Tage bis Ernte:
@@ -182,6 +182,7 @@ ANTWORTE IMMER als gültiges JSON mit GENAU DIESEM SCHEMA:
 }
 """
 
+
 # --------------------------------------------------
 # 🧠 Hilfsfunktion: OpenAI-Call (gpt-5.1-mini)
 # --------------------------------------------------
@@ -212,7 +213,6 @@ def _call_openai_json(system_prompt: str, data_url: str, user_text: str) -> dict
                 status_code=429,
                 detail="OpenAI-Ratelimit erreicht – bitte später erneut versuchen.",
             )
-    # falls kein Fehler, aber Variable 'response' nicht definiert wäre:
         raise HTTPException(
             status_code=500,
             detail=f"Fehler bei der Anfrage an OpenAI: {e}",
@@ -229,20 +229,14 @@ def _call_openai_json(system_prompt: str, data_url: str, user_text: str) -> dict
 
 
 # --------------------------------------------------
-# 📸 Diagnose-Endpoint (Diagnose + Reifegrad über mode)
+# 📸 ENDPOINT 1: Allgemeine Diagnose
 # --------------------------------------------------
 
 
 @app.post("/diagnose")
-async def diagnose(
-    image: UploadFile = File(...),
-    mode: str = Form("diagnosis"),  # "diagnosis" oder "ripeness"
-):
+async def diagnose(image: UploadFile = File(...)):
     """
-    Nimmt ein Bild (JPG/PNG) entgegen und analysiert es je nach Modus:
-
-    - mode="diagnosis": allgemeine Diagnose (Mängel, Schädlinge, Stress, etc.)
-    - mode="ripeness":  Reifegrad der Blüte anhand der Trichome
+    Erkennt Probleme wie Mängel, Schädlinge, Stress etc.
     """
 
     if image.content_type not in ("image/jpeg", "image/png"):
@@ -252,65 +246,12 @@ async def diagnose(
     img_base64 = base64.b64encode(img_bytes).decode("utf-8")
     data_url = f"data:{image.content_type};base64,{img_base64}"
 
-    # ---------- Reifegrad-Modus ----------
-    if mode == "ripeness":
-        result = _call_openai_json(
-            RIPENESS_PROMPT,
-            data_url,
-            "Analysiere bitte NUR den Reifegrad der Blüte anhand der Trichome auf diesem Bild.",
-        )
-
-        # Sanity-Checks & Defaults
-        stage = result.get("reifegrad_stufe")
-        if not isinstance(stage, str) or not stage.strip():
-            stage = "zu früh"
-        result["reifegrad_stufe"] = stage.strip()
-
-        days = result.get("empfohlene_tage_bis_ernte", 0)
-        if not isinstance(days, int):
-            try:
-                days = int(days)
-            except Exception:
-                days = 0
-        result["empfohlene_tage_bis_ernte"] = days
-
-        rec = result.get("empfehlung")
-        if not isinstance(rec, str) or not rec.strip():
-            # einfache Logik falls KI schwimmt
-            if days > 1:
-                rec = "weiter reifen lassen"
-            elif days < -1:
-                rec = "schnellstmöglich ernten"
-            else:
-                rec = "jetzt ernten"
-        result["empfehlung"] = rec.strip()
-
-        ta = result.get("trichom_anteile") or {}
-        safe_ta = {}
-        for key in ["klar", "milchig", "bernstein"]:
-            val = ta.get(key, 0)
-            if not isinstance(val, int):
-                try:
-                    val = int(val)
-                except Exception:
-                    val = 0
-            if val < 0:
-                val = 0
-            if val > 100:
-                val = 100
-            safe_ta[key] = val
-        result["trichom_anteile"] = safe_ta
-
-        return result
-
-    # ---------- Diagnose-Modus ----------
     result = _call_openai_json(
         DIAGNOSIS_PROMPT,
         data_url,
         "Analysiere dieses Bild der Cannabis-Pflanze und gib nur das JSON im Schema zurück.",
     )
 
-    # Alternativen filtern: alles < 45 % raus
     alternativen = result.get("alternativen") or []
     gefiltert = []
     for alt in alternativen:
@@ -324,3 +265,68 @@ async def diagnose(
 
     return result
 
+
+# --------------------------------------------------
+# 🌼 ENDPOINT 2: Reifegrad / Trichome
+# --------------------------------------------------
+
+
+@app.post("/ripeness")
+async def ripeness(image: UploadFile = File(...)):
+    """
+    Bewertet NUR den Reifegrad der Blüte anhand der Trichome.
+    """
+
+    if image.content_type not in ("image/jpeg", "image/png"):
+        raise HTTPException(status_code=400, detail="Nur JPG und PNG sind erlaubt.")
+
+    img_bytes = await image.read()
+    img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+    data_url = f"data:{image.content_type};base64,{img_base64}"
+
+    result = _call_openai_json(
+        RIPENESS_PROMPT,
+        data_url,
+        "Analysiere NUR den Reifegrad der Blüte anhand der Trichome.",
+    )
+
+    stage = result.get("reifegrad_stufe")
+    if not isinstance(stage, str) or not stage.strip():
+        stage = "zu früh"
+    result["reifegrad_stufe"] = stage.strip()
+
+    days = result.get("empfohlene_tage_bis_ernte", 0)
+    if not isinstance(days, int):
+        try:
+            days = int(days)
+        except Exception:
+            days = 0
+    result["empfohlene_tage_bis_ernte"] = days
+
+    rec = result.get("empfehlung")
+    if not isinstance(rec, str) or not rec.strip():
+        if days > 1:
+            rec = "weiter reifen lassen"
+        elif days < -1:
+            rec = "schnellstmöglich ernten"
+        else:
+            rec = "jetzt ernten"
+    result["empfehlung"] = rec.strip()
+
+    ta = result.get("trichom_anteile") or {}
+    safe_ta = {}
+    for key in ["klar", "milchig", "bernstein"]:
+        val = ta.get(key, 0)
+        if not isinstance(val, int):
+            try:
+                val = int(val)
+            except Exception:
+                val = 0
+        if val < 0:
+            val = 0
+        if val > 100:
+            val = 100
+        safe_ta[key] = val
+    result["trichom_anteile"] = safe_ta
+
+    return result

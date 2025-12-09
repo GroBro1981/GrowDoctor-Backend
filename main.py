@@ -1,7 +1,6 @@
 import os
 import base64
 import json
-from typing import List, Optional
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +9,6 @@ from openai import OpenAI
 # --------------------------------------------------
 # 🔑 OpenAI-Client
 # --------------------------------------------------
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise RuntimeError(
@@ -22,17 +20,15 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # --------------------------------------------------
 # 🌐 FastAPI-App
 # --------------------------------------------------
-
 app = FastAPI(
     title="Canalyzer Backend",
-    description="Bildbasierte Cannabis-Diagnose-API (Diagnose + Reifegrad + Pro-Funktionen)",
+    description="Bildbasierte Cannabis-Diagnose-API (Diagnose + Reifegrad)",
     version="2.0.0",
 )
 
-# ✅ KORREKTER CORS-BLOCK
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # für Entwicklung ok, später einschränken
+    allow_origins=["*"],  # für Entwicklung ok, später einschränken
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -186,37 +182,16 @@ ANTWORTE IMMER als gültiges JSON mit GENAU DIESEM SCHEMA:
 }
 """
 
-MULTI_SUMMARY_PROMPT = """
-Du bist ein Cannabis-Grow-Experte.
-
-Du bekommst mehrere Einzel-Diagnosen im JSON-Format (eine pro Bild).
-Fasse sie in 3–6 Sätzen zusammen:
-- Welche Hauptprobleme treten am häufigsten auf?
-- Sind es eher Mängel, Stress, Schädlinge, Pilze oder kein akutes Problem?
-- Welche Sofortmaßnahmen empfiehlst du insgesamt?
-- Wie dringend ist die Situation insgesamt? (niedrig / mittel / hoch / sofort handeln)
-Antwort NUR als normaler Text, kein JSON.
-"""
-
-CHAT_PROMPT = """
-Du bist der 'GrowDoctor' – ein freundlicher, sehr erfahrener Cannabis-Grower.
-Der Nutzer stellt Fragen zu seiner aktuellen Diagnose / seinem Grow.
-Antworte kurz, klar und konkret mit praxisnahen Tipps (max. 10 Sätze).
-Wenn der Nutzer Unsinn fragt, bleib freundlich und erkläre kurz, warum.
-"""
-
 
 # --------------------------------------------------
-# 🧠 Hilfsfunktionen für OpenAI
+# 🧠 Hilfsfunktion: OpenAI-Call (gpt-5.1-mini)
 # --------------------------------------------------
+
 
 def _call_openai_json(system_prompt: str, data_url: str, user_text: str) -> dict:
-    """
-    Ruft gpt-4.1-mini mit Bild + Text auf und erwartet JSON-Antwort.
-    """
     try:
         response = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-5.1-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
@@ -253,54 +228,32 @@ def _call_openai_json(system_prompt: str, data_url: str, user_text: str) -> dict
         )
 
 
-def _call_openai_text(system_prompt: str, user_text: str) -> str:
-    """
-    Einfacher Text-Call (für Multi-Zusammenfassung und Chat).
-    """
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text},
-            ],
-            max_tokens=600,
-            temperature=0.3,
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Fehler bei der Anfrage an OpenAI (Text): {e}",
-        )
-
-    return response.choices[0].message.content
-
-
 # --------------------------------------------------
-# 📸 ENDPOINT 1: Einzelfoto – Allgemeine Diagnose
+# 📸 ENDPOINT 1: Allgemeine Diagnose
 # --------------------------------------------------
+
 
 @app.post("/diagnose")
 async def diagnose(image: UploadFile = File(...)):
     """
-    Erkennt Probleme wie Mängel, Schädlinge, Stress etc. anhand EINES Bildes.
+    Erkennt Probleme wie Mängel, Schädlinge, Stress etc.
     """
 
-    # ✅ nur prüfen, ob es überhaupt ein Bild ist – kein enger JPG/PNG-Check mehr
     if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=400,
-            detail="Nur Bilddateien sind erlaubt.",
-        )
+        raise HTTPException(status_code=400, detail="Nur Bilddateien sind erlaubt.")
 
     img_bytes = await image.read()
     img_base64 = base64.b64encode(img_bytes).decode("utf-8")
     data_url = f"data:{image.content_type};base64,{img_base64}"
 
+    user_text = (
+        "Analysiere dieses Bild der Cannabis-Pflanze und gib nur das JSON im Schema zurück."
+    )
+
     result = _call_openai_json(
         DIAGNOSIS_PROMPT,
         data_url,
-        "Analysiere dieses Bild der Cannabis-Pflanze und gib nur das JSON im Schema zurück.",
+        user_text,
     )
 
     # Alternativen filtern: alles < 45 % raus
@@ -319,29 +272,55 @@ async def diagnose(image: UploadFile = File(...)):
 
 
 # --------------------------------------------------
-# 🌼 ENDPOINT 2: Einzelfoto – Reifegrad / Trichome
+# 🌼 ENDPOINT 2: Reifegrad / Trichome
 # --------------------------------------------------
 
+
 @app.post("/ripeness")
-async def ripeness(image: UploadFile = File(...)):
+async def ripeness(
+    image: UploadFile = File(...),
+    preference: str = Form("balanced"),  # "energetic" | "balanced" | "couchlock"
+):
     """
     Bewertet NUR den Reifegrad der Blüte anhand der Trichome.
     """
 
     if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=400,
-            detail="Nur Bilddateien sind erlaubt.",
-        )
+        raise HTTPException(status_code=400, detail="Nur Bilddateien sind erlaubt.")
 
     img_bytes = await image.read()
     img_base64 = base64.b64encode(img_bytes).decode("utf-8")
     data_url = f"data:{image.content_type};base64,{img_base64}"
 
+    # kleinen Text je nach Wunschwirkung bauen
+    if preference == "energetic":
+        pref_text = (
+            "Der Nutzer wünscht eine eher ENERGETISCHE, aktive Wirkung "
+            "(mehr klare/milchige Trichome, weniger bernsteinfarben). "
+            "Plane die Ernte eher FRÜHER im optimalen Fenster."
+        )
+    elif preference == "couchlock":
+        pref_text = (
+            "Der Nutzer wünscht eine starke, SEDIERENDE Couchlock-Wirkung "
+            "(viele bernsteinfarbene Trichome). "
+            "Plane die Ernte eher SPÄTER im optimalen Fenster."
+        )
+    else:
+        pref_text = (
+            "Der Nutzer wünscht eine AUSGEGLICHENE Wirkung "
+            "(Mischung aus milchigen und etwas bernsteinfarbenen Trichomen)."
+        )
+
+    user_text = (
+        "Analysiere NUR den Reifegrad der Blüte anhand der Trichome. "
+        "Berücksichtige folgende Wunschwirkung des Nutzers: "
+        f"{pref_text}"
+    )
+
     result = _call_openai_json(
         RIPENESS_PROMPT,
         data_url,
-        "Analysiere NUR den Reifegrad der Blüte anhand der Trichome.",
+        user_text,
     )
 
     # Sanity-Checks & Defaults
@@ -385,73 +364,3 @@ async def ripeness(image: UploadFile = File(...)):
     result["trichom_anteile"] = safe_ta
 
     return result
-
-
-# --------------------------------------------------
-# 📸📸 ENDPOINT 3: Multi-Foto-Diagnose (Pro)
-# --------------------------------------------------
-
-@app.post("/diagnose_multi")
-async def diagnose_multi(images: List[UploadFile] = File(...)):
-    """
-    Nimmt mehrere Bilder entgegen und gibt pro Bild eine Diagnose + kurze Gesamt-Zusammenfassung.
-    """
-
-    if not images or len(images) == 0:
-        raise HTTPException(status_code=400, detail="Keine Bilder hochgeladen.")
-
-    einzel_results = []
-
-    for idx, image in enumerate(images):
-        if not image.content_type or not image.content_type.startswith("image/"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Nur Bilddateien sind erlaubt (Bild {idx + 1}).",
-            )
-
-        img_bytes = await image.read()
-        img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-        data_url = f"data:{image.content_type};base64,{img_base64}"
-
-        result = _call_openai_json(
-            DIAGNOSIS_PROMPT,
-            data_url,
-            f"Analysiere dieses Bild der Cannabis-Pflanze (Multi-Foto-Diagnose, Bild {idx + 1}).",
-        )
-
-        einzel_results.append(result)
-
-    # Text-Zusammenfassung über alle Einzel-Diagnosen
-    try:
-        summary_input = json.dumps(einzel_results, ensure_ascii=False)
-        summary_text = _call_openai_text(
-            MULTI_SUMMARY_PROMPT,
-            f"Hier sind die Einzel-Diagnosen als JSON-Liste:\n\n{summary_input}",
-        )
-    except HTTPException:
-        summary_text = "Zusammenfassung konnte nicht erstellt werden."
-
-    return {
-        "anzahl_bilder": len(einzel_results),
-        "einzel_diagnosen": einzel_results,
-        "zusammenfassung": summary_text,
-    }
-
-
-# --------------------------------------------------
-# 💬 ENDPOINT 4: Chat mit dem GrowDoctor (Pro)
-# --------------------------------------------------
-
-@app.post("/chat")
-async def chat_with_growdoctor(
-    message: str = Form(...),
-):
-    """
-    Einfacher Text-Chat mit dem GrowDoctor.
-    (Derzeit ohne Bild; Bilder laufen über die Diagnose-Endpunkte.)
-    """
-    if not message or not message.strip():
-        raise HTTPException(status_code=400, detail="Nachricht darf nicht leer sein.")
-
-    answer = _call_openai_text(CHAT_PROMPT, message.strip())
-    return {"answer": answer}

@@ -1,6 +1,8 @@
 import os
 import base64
 import json
+from datetime import datetime
+from typing import Dict, List, Any
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,7 +25,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 app = FastAPI(
     title="Canalyzer Backend",
     description="Bildbasierte Cannabis-Diagnose-API (Diagnose + Reifegrad)",
-    version="2.0.0",
+    version="2.1.0",
 )
 
 app.add_middleware(
@@ -182,16 +184,39 @@ ANTWORTE IMMER als gültiges JSON mit GENAU DIESEM SCHEMA:
 }
 """
 
+# --------------------------------------------------
+# 🧠 Reifegrad-Verlauf (in-memory, pro User)
+# --------------------------------------------------
+
+RIPENESS_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
+
 
 # --------------------------------------------------
-# 🧠 Hilfsfunktion: OpenAI-Call (gpt-4.1-mini)
+# 🧠 Hilfsfunktion: OpenAI-Call (Free/Premium)
 # --------------------------------------------------
 
 
-def _call_openai_json(system_prompt: str, data_url: str, user_text: str) -> dict:
+def _select_model(plan: str) -> str:
+    """
+    Free/Premium-Umschaltung:
+    - "free"  -> gpt-4o-mini  (günstig, schnell)
+    - "pro"   -> gpt-4.1-mini (etwas teurer, genauer)
+    """
+    plan = (plan or "free").lower()
+    if plan == "pro":
+        return "gpt-4.1-mini"
+    return "gpt-4o-mini"
+
+
+def _call_openai_json(
+    system_prompt: str,
+    data_url: str,
+    user_text: str,
+    model_name: str,
+) -> dict:
     try:
         response = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=model_name,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
@@ -234,7 +259,11 @@ def _call_openai_json(system_prompt: str, data_url: str, user_text: str) -> dict
 
 
 @app.post("/diagnose")
-async def diagnose(image: UploadFile = File(...)):
+async def diagnose(
+    image: UploadFile = File(...),
+    plan: str = Form("free"),     # NEU: free | pro
+    user_id: str = Form("anon"),  # NEU: später für History & Konten
+):
     """
     Erkennt Probleme wie Mängel, Schädlinge, Stress etc.
     """
@@ -250,10 +279,13 @@ async def diagnose(image: UploadFile = File(...)):
         "Analysiere dieses Bild der Cannabis-Pflanze und gib nur das JSON im Schema zurück."
     )
 
+    model_name = _select_model(plan)
+
     result = _call_openai_json(
         DIAGNOSIS_PROMPT,
         data_url,
         user_text,
+        model_name=model_name,
     )
 
     # Alternativen filtern: alles < 45 % raus
@@ -268,11 +300,18 @@ async def diagnose(image: UploadFile = File(...)):
             continue
     result["alternativen"] = gefiltert
 
+    # Info für Client (optional)
+    result["_meta"] = {
+        "plan": plan,
+        "modell": model_name,
+        "user_id": user_id,
+    }
+
     return result
 
 
 # --------------------------------------------------
-# 🌼 ENDPOINT 2: Reifegrad / Trichome
+# 🌼 ENDPOINT 2: Reifegrad / Trichome + Verlauf
 # --------------------------------------------------
 
 
@@ -280,6 +319,8 @@ async def diagnose(image: UploadFile = File(...)):
 async def ripeness(
     image: UploadFile = File(...),
     preference: str = Form("balanced"),  # "energetic" | "balanced" | "couchlock"
+    plan: str = Form("free"),            # NEU: free | pro
+    user_id: str = Form("anon"),         # NEU: Verlauf pro Nutzer
 ):
     """
     Bewertet NUR den Reifegrad der Blüte anhand der Trichome.
@@ -317,10 +358,13 @@ async def ripeness(
         f"{pref_text}"
     )
 
+    model_name = _select_model(plan)
+
     result = _call_openai_json(
         RIPENESS_PROMPT,
         data_url,
         user_text,
+        model_name=model_name,
     )
 
     # Sanity-Checks & Defaults
@@ -363,4 +407,34 @@ async def ripeness(
         safe_ta[key] = val
     result["trichom_anteile"] = safe_ta
 
+    # --- Verlauf speichern (max 20 Einträge pro user_id) ---
+    entry = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "preference": preference,
+        "plan": plan,
+        "modell": model_name,
+        "result": result,
+    }
+    history = RIPENESS_HISTORY.setdefault(user_id, [])
+    history.append(entry)
+    if len(history) > 20:
+        history.pop(0)
+
+    # Meta-Info anhängen
+    result["_meta"] = {
+        "user_id": user_id,
+        "plan": plan,
+        "modell": model_name,
+        "history_count": len(history),
+    }
+
     return result
+
+
+@app.get("/ripeness/history")
+def ripeness_history(user_id: str):
+    """
+    Gibt den Reifegrad-Verlauf für einen Nutzer zurück.
+    (Nur in-memory, geht nach Server-Neustart verloren.)
+    """
+    return RIPENESS_HISTORY.get(user_id, [])

@@ -184,14 +184,14 @@ ANTWORTE IMMER als gültiges JSON mit GENAU DIESEM SCHEMA:
 
 
 # --------------------------------------------------
-# 🧠 Hilfsfunktion: OpenAI-Call (gpt-5.1-mini)
+# 🧠 Hilfsfunktion: OpenAI-Call (gpt-4.1-mini)
 # --------------------------------------------------
 
 
 def _call_openai_json(system_prompt: str, data_url: str, user_text: str) -> dict:
     try:
         response = client.chat.completions.create(
-            model="gpt-5.1-mini",
+            model="gpt-4.1-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
@@ -239,8 +239,8 @@ async def diagnose(image: UploadFile = File(...)):
     Erkennt Probleme wie Mängel, Schädlinge, Stress etc.
     """
 
-    if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Nur Bilddateien sind erlaubt.")
+    if image.content_type not in ("image/jpeg", "image/png"):
+        raise HTTPException(status_code=400, detail="Nur JPG und PNG sind erlaubt.")
 
     img_bytes = await image.read()
     img_base64 = base64.b64encode(img_bytes).decode("utf-8")
@@ -285,8 +285,8 @@ async def ripeness(
     Bewertet NUR den Reifegrad der Blüte anhand der Trichome.
     """
 
-    if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Nur Bilddateien sind erlaubt.")
+    if image.content_type not in ("image/jpeg", "image/png"):
+        raise HTTPException(status_code=400, detail="Nur JPG und PNG sind erlaubt.")
 
     img_bytes = await image.read()
     img_base64 = base64.b64encode(img_bytes).decode("utf-8")

@@ -23,27 +23,28 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # 🌐 FastAPI-App
 # --------------------------------------------------
 app = FastAPI(
-    title="Canalyzer Backend",
-    description="Bildbasierte Cannabis-Diagnose-API (Diagnose + Reifegrad)",
-    version="2.1.0",
+    title="Canalyzer / GrowDoctor Backend",
+    description="Bildbasierte Cannabis-Diagnose-API + Reifegrad + Chat",
+    version="2.2.0",
 )
 
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # für Entwicklung ok, später einschränken
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware(
+        allow_origins=["*"],  # für Entwicklung ok, später einschränken
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 )
 
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Canalyzer Backend läuft 😎"}
+    return {"status": "ok", "message": "GrowDoctor Backend läuft 😎"}
 
 
 # --------------------------------------------------
-# 🧾 Prompts
+# 🧾 Prompts: Diagnose & Reifegrad
 # --------------------------------------------------
 
 DIAGNOSIS_PROMPT = """
@@ -184,6 +185,26 @@ ANTWORTE IMMER als gültiges JSON mit GENAU DIESEM SCHEMA:
 }
 """
 
+CHAT_PROMPT_BASE = """
+Du bist „GrowDoctor“, ein freundlicher, erfahrener Berater für Cannabis-Anbau und -Pflanzengesundheit.
+
+WICHTIG:
+- Du gibst NUR harm-reduzierende Tipps für Kleingärtner und Hobby-Grower.
+- Erinnere die Nutzer regelmäßig daran, die Gesetze ihres Landes zu beachten
+  und nur dort anzubauen, wo es legal oder geduldet ist.
+- Keine Tipps für kommerzielle Großproduktion, Schmuggel oder Verkauf.
+- Keine Planung illegaler Aktivitäten.
+
+SPRACHE:
+- Antworte IMMER in dieser Sprache: {language_name} ({language_code}).
+- Wenn der Nutzer in einer anderen Sprache schreibt, kannst du kurz bestätigen,
+  bleibst aber in der gewählten Sprache.
+
+STIL:
+- Erklär freundlich, klar, in kurzen Absätzen.
+- Nutze, wenn sinnvoll, Aufzählungen und konkrete Schritte.
+"""
+
 # --------------------------------------------------
 # 🧠 Reifegrad-Verlauf (in-memory, pro User)
 # --------------------------------------------------
@@ -192,17 +213,18 @@ RIPENESS_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
 
 
 # --------------------------------------------------
-# 🧠 Hilfsfunktion: OpenAI-Call (Free/Premium)
+# 🧠 Modellwahl & OpenAI-Hilfsfunktionen
 # --------------------------------------------------
-
 
 def _select_model(plan: str) -> str:
     """
     Free/Premium-Umschaltung:
     - "free"  -> gpt-4o-mini  (günstig, schnell)
-    - "pro"   -> gpt-4.1-mini (etwas teurer, genauer)
+    - "pro"   -> gpt-4.1-mini (präziser, teurer)
     """
-    plan = (plan or "free").lower()
+    if not plan:
+        plan = "free"
+    plan = plan.lower()
     if plan == "pro":
         return "gpt-4.1-mini"
     return "gpt-4o-mini"
@@ -253,21 +275,50 @@ def _call_openai_json(
         )
 
 
+def _call_openai_chat_text(
+    system_prompt: str,
+    user_text: str,
+    model_name: str,
+) -> str:
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_text},
+            ],
+            max_tokens=900,
+            temperature=0.3,
+        )
+    except Exception as e:
+        msg = str(e)
+        if "rate_limit" in msg or "rate_limit_exceeded" in msg:
+            raise HTTPException(
+                status_code=429,
+                detail="OpenAI-Ratelimit erreicht – bitte später erneut versuchen.",
+            )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Fehler bei der Anfrage an OpenAI (Chat): {e}",
+        )
+
+    content = response.choices[0].message.content or ""
+    return content.strip()
+
+
 # --------------------------------------------------
 # 📸 ENDPOINT 1: Allgemeine Diagnose
 # --------------------------------------------------
 
-
 @app.post("/diagnose")
 async def diagnose(
     image: UploadFile = File(...),
-    plan: str = Form("free"),     # NEU: free | pro
-    user_id: str = Form("anon"),  # NEU: später für History & Konten
+    plan: str = Form("free"),
+    user_id: str = Form("anon"),
 ):
     """
     Erkennt Probleme wie Mängel, Schädlinge, Stress etc.
     """
-
     if image.content_type not in ("image/jpeg", "image/png"):
         raise HTTPException(status_code=400, detail="Nur JPG und PNG sind erlaubt.")
 
@@ -288,7 +339,6 @@ async def diagnose(
         model_name=model_name,
     )
 
-    # Alternativen filtern: alles < 45 % raus
     alternativen = result.get("alternativen") or []
     gefiltert = []
     for alt in alternativen:
@@ -300,7 +350,6 @@ async def diagnose(
             continue
     result["alternativen"] = gefiltert
 
-    # Info für Client (optional)
     result["_meta"] = {
         "plan": plan,
         "modell": model_name,
@@ -314,18 +363,16 @@ async def diagnose(
 # 🌼 ENDPOINT 2: Reifegrad / Trichome + Verlauf
 # --------------------------------------------------
 
-
 @app.post("/ripeness")
 async def ripeness(
     image: UploadFile = File(...),
     preference: str = Form("balanced"),  # "energetic" | "balanced" | "couchlock"
-    plan: str = Form("free"),            # NEU: free | pro
-    user_id: str = Form("anon"),         # NEU: Verlauf pro Nutzer
+    plan: str = Form("free"),
+    user_id: str = Form("anon"),
 ):
     """
     Bewertet NUR den Reifegrad der Blüte anhand der Trichome.
     """
-
     if image.content_type not in ("image/jpeg", "image/png"):
         raise HTTPException(status_code=400, detail="Nur JPG und PNG sind erlaubt.")
 
@@ -333,7 +380,6 @@ async def ripeness(
     img_base64 = base64.b64encode(img_bytes).decode("utf-8")
     data_url = f"data:{image.content_type};base64,{img_base64}"
 
-    # kleinen Text je nach Wunschwirkung bauen
     if preference == "energetic":
         pref_text = (
             "Der Nutzer wünscht eine eher ENERGETISCHE, aktive Wirkung "
@@ -367,7 +413,6 @@ async def ripeness(
         model_name=model_name,
     )
 
-    # Sanity-Checks & Defaults
     stage = result.get("reifegrad_stufe")
     if not isinstance(stage, str) or not stage.strip():
         stage = "zu früh"
@@ -407,7 +452,6 @@ async def ripeness(
         safe_ta[key] = val
     result["trichom_anteile"] = safe_ta
 
-    # --- Verlauf speichern (max 20 Einträge pro user_id) ---
     entry = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "preference": preference,
@@ -420,7 +464,6 @@ async def ripeness(
     if len(history) > 20:
         history.pop(0)
 
-    # Meta-Info anhängen
     result["_meta"] = {
         "user_id": user_id,
         "plan": plan,
@@ -438,3 +481,64 @@ def ripeness_history(user_id: str):
     (Nur in-memory, geht nach Server-Neustart verloren.)
     """
     return RIPENESS_HISTORY.get(user_id, [])
+
+
+# --------------------------------------------------
+# 💬 ENDPOINT 3: Chat with GrowDoctor
+# --------------------------------------------------
+
+LANGUAGE_NAMES = {
+    "de": "Deutsch",
+    "en": "Englisch",
+    "fr": "Französisch",
+    "it": "Italienisch",
+    "es": "Spanisch",
+    "pt": "Portugiesisch",
+    "cs": "Tschechisch",
+    "pl": "Polnisch",
+    "nl": "Niederländisch",
+}
+
+
+@app.post("/chat")
+async def chat(
+    message: str = Form(...),
+    language: str = Form("de"),   # Sprachcode: de, en, fr, it, es, pt, cs, pl, nl
+    plan: str = Form("free"),
+    user_id: str = Form("anon"),
+):
+    """
+    Text-Chat mit GrowDoctor (ohne Bild).
+    """
+    msg = message.strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="Feld 'message' darf nicht leer sein.")
+
+    lang_code = language.lower()
+    if lang_code not in LANGUAGE_NAMES:
+        lang_code = "en"
+    lang_name = LANGUAGE_NAMES[lang_code]
+
+    model_name = _select_model(plan)
+
+    system_prompt = CHAT_PROMPT_BASE.format(
+        language_name=lang_name,
+        language_code=lang_code,
+    )
+
+    answer = _call_openai_chat_text(
+        system_prompt=system_prompt,
+        user_text=msg,
+        model_name=model_name,
+    )
+
+    return {
+        "answer": answer,
+        "_meta": {
+            "language": lang_code,
+            "language_name": lang_name,
+            "plan": plan,
+            "modell": model_name,
+            "user_id": user_id,
+        },
+    }

@@ -128,57 +128,58 @@ async def ripeness(
         data_url,
         text
     )
+
     # --- Trichome-Validierung + Normalisierung ---
-def _to_float(x):
-    try:
-        return float(x)
-    except Exception:
-        return 0.0
+    def _to_float(x):
+        try:
+            return float(x)
+        except Exception:
+            return 0.0
 
-klar = _to_float(result.get("klar"))
-milchig = _to_float(result.get("milchig"))
-bernstein = _to_float(result.get("bernstein"))
+    klar = _to_float(result.get("klar"))
+    milchig = _to_float(result.get("milchig"))
+    bernstein = _to_float(result.get("bernstein"))
 
-total = klar + milchig + bernstein
+    total = klar + milchig + bernstein
 
-# Wenn keine brauchbaren Werte geliefert wurden -> Gate (Bild ungeeignet / KI unsicher)
-if total <= 0:
-    return {
-        "ok": False,
-        "ampel": "rot",
-        "message": "Keine verwertbaren Trichom-Werte erkannt. Bitte nur Makroaufnahme der Trichome (Köpfe sichtbar).",
-        "foto_tipps": [
-            "Makro/Zoom nutzen (Trichome müssen als Köpfe sichtbar sein).",
-            "Gute Beleuchtung, kein Blitz/Überstrahlen.",
-            "Hand ruhig / Auflage nutzen, Fokus auf die Trichome.",
-            "Nicht ganze Pflanze/Blatt – nur Blüte/Trichome nah."
-        ],
-        "min_requirements": [
-            "Trichome klar erkennbar (einzelne Köpfe sichtbar)",
-            "Scharf (keine Bewegungsunschärfe)",
-            "Nahaufnahme der Blüte (Makro/Zoom)",
-            "Keine starke Überbelichtung"
-        ],
-    }
+    # Wenn keine brauchbaren Werte geliefert wurden -> Gate (Bild ungeeignet / KI unsicher)
+    if total <= 0:
+        return {
+            "ok": False,
+            "ampel": "rot",
+            "message": "Keine verwertbaren Trichom-Werte erkannt. Bitte nur Makroaufnahme der Trichome (Köpfe sichtbar).",
+            "foto_tipps": [
+                "Makro/Zoom nutzen (Trichome müssen als Köpfe sichtbar sein).",
+                "Gute Beleuchtung, kein Blitz/Überstrahlen.",
+                "Hand ruhig / Auflage nutzen, Fokus auf die Trichome.",
+                "Nicht ganze Pflanze/Blatt – nur Blüte/Trichome nah."
+            ],
+            "min_requirements": [
+                "Trichome klar erkennbar (einzelne Köpfe sichtbar)",
+                "Scharf (keine Bewegungsunschärfe)",
+                "Nahaufnahme der Blüte (Makro/Zoom)",
+                "Keine starke Überbelichtung"
+            ],
+        }
 
-# Normalisieren auf 100%
-klar = (klar / total) * 100.0
-milchig = (milchig / total) * 100.0
-bernstein = (bernstein / total) * 100.0
+    # Normalisieren auf 100%
+    klar = (klar / total) * 100.0
+    milchig = (milchig / total) * 100.0
+    bernstein = (bernstein / total) * 100.0
 
-# Runden + wieder ins Result schreiben
-result["klar"] = int(round(klar))
-result["milchig"] = int(round(milchig))
-result["bernstein"] = int(round(bernstein))
+    # Runden + wieder ins Result schreiben
+    result["klar"] = int(round(klar))
+    result["milchig"] = int(round(milchig))
+    result["bernstein"] = int(round(bernstein))
 
-# Rounding-Korrektur (Summe exakt 100)
-diff = 100 - (result["klar"] + result["milchig"] + result["bernstein"])
-if diff != 0:
-    # Korrigiere den größten Wert
-    biggest_key = max(["klar", "milchig", "bernstein"], key=lambda k: result[k])
-    result[biggest_key] += diff
+    # Rounding-Korrektur (Summe exakt 100)
+    diff = 100 - (result["klar"] + result["milchig"] + result["bernstein"])
+    if diff != 0:
+        # Korrigiere den größten Wert
+        biggest_key = max(["klar", "milchig", "bernstein"], key=lambda k: result[k])
+        result[biggest_key] += diff
 
-        # Qualitäts-Gate: ungeeignetes Bild sauber zurückgeben
+    # Qualitäts-Gate: ungeeignetes Bild sauber zurückgeben
     if not isinstance(result, dict):
         return {
             "ok": False,
@@ -216,22 +217,22 @@ if diff != 0:
             ],
         }
 
-# --- Ampel-Logik erzwingen (deterministisch) ---
-klar = result.get("klar", 0)
-milchig = result.get("milchig", 0)
-bernstein = result.get("bernstein", 0)
+    # --- Ampel-Logik erzwingen (deterministisch) ---
+    klar = result.get("klar", 0)
+    milchig = result.get("milchig", 0)
+    bernstein = result.get("bernstein", 0)
 
-if klar >= 60:
-    result["ampel"] = "rot"
-    result["stufe"] = "zu früh"
-elif milchig >= 50 and bernstein < 10:
-    result["ampel"] = "gelb"
-    result["stufe"] = "fast reif"
-elif milchig >= 40 and bernstein >= 10:
-    result["ampel"] = "grün"
-    result["stufe"] = "erntereif"
-else:
-    result["ampel"] = "gelb"
-    result["stufe"] = "uneindeutig"
+    if klar >= 60:
+        result["ampel"] = "rot"
+        result["stufe"] = "zu früh"
+    elif milchig >= 50 and bernstein < 10:
+        result["ampel"] = "gelb"
+        result["stufe"] = "fast reif"
+    elif milchig >= 40 and bernstein >= 10:
+        result["ampel"] = "grün"
+        result["stufe"] = "erntereif"
+    else:
+        result["ampel"] = "gelb"
+        result["stufe"] = "uneindeutig"
 
     return result

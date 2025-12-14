@@ -99,7 +99,16 @@ async def diagnose(image: UploadFile = File(...)):
         "Analysiere dieses Bild."
     )
 
-    return result
+    return {
+    "hauptproblem": result.get("diagnosis", "Unbekannt"),
+    "kategorie": result.get("diagnosis", "unbekannt"),
+    "wahrscheinlichkeit": int((result.get("confidence", 0.0) or 0.0) * 100),
+    "schweregrad": "unbekannt",
+    "dringlichkeit": "niedrig",
+    "empfehlungen": result.get("recommendations", []),
+    "raw": result
+}
+
 
 
 # --------------------------------------------------

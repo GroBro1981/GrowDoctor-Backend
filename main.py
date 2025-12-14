@@ -99,7 +99,12 @@ async def diagnose(image: UploadFile = File(...)):
         "Analysiere dieses Bild."
     )
 
-    return result
+    return {
+    "diagnosis": result.get("diagnosis", "Unklar"),
+    "recommendations": result.get("recommendations", []),
+    "raw": result
+}
+
 
 
 # --------------------------------------------------
@@ -236,3 +241,4 @@ async def ripeness(
         result["stufe"] = "uneindeutig"
 
     return result
+

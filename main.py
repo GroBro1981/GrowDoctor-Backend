@@ -116,10 +116,14 @@ async def diagnose(image: UploadFile = File(...)):
     )
 
     return {
-    "diagnosis": result.get("diagnosis", "Unklar"),
+    "category": result.get("diagnosis", "unbekannt"),
+    "probability": int((result.get("confidence", 0.0) or 0.0) * 100),
+    "severity": "unbekannt",
+    "urgency": "niedrig",
     "recommendations": result.get("recommendations", []),
     "raw": result
 }
+
 
 
 
@@ -257,5 +261,6 @@ async def ripeness(
         result["stufe"] = "uneindeutig"
 
     return result
+
 
 

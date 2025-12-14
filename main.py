@@ -81,8 +81,24 @@ def _call_openai_json(system_prompt: str, data_url: str, user_text: str) -> dict
 # --------------------------------------------------
 DIAGNOSIS_PROMPT = """
 Du bist ein sehr erfahrener Cannabis-Pflanzenarzt.
-Analysiere das Bild und gib nur das JSON-Schema zurück, wie besprochen.
+WICHTIG: Gib ausschließlich gültiges JSON zurück (keinen Text davor/danach).
+
+Analysiere das Bild und gib GENAU dieses Schema zurück:
+
+{
+  "species": "Cannabis" | "Not cannabis" | "Unsure",
+  "diagnosis": "kurzer, klarer Befund (z.B. Stickstoffmangel / Kaliummangel / Schädlingsbefall / Pilz / Hitzestress / gesund / unklar)",
+  "confidence": 0.0,
+  "symptoms": ["...","..."],
+  "recommendations": ["1-2 Sofortmaßnahmen, konkret"],
+  "notes": "kurzer Hinweis (optional)"
+}
+
+Regeln:
+- Wenn du dir nicht sicher bist, setze species = "Unsure" und diagnosis = "unklar".
+- confidence als Zahl 0.0 bis 1.0.
 """
+
 
 @app.post("/diagnose")
 async def diagnose(image: UploadFile = File(...)):
@@ -241,4 +257,5 @@ async def ripeness(
         result["stufe"] = "uneindeutig"
 
     return result
+
 

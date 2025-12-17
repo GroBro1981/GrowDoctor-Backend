@@ -1,367 +1,449 @@
 import os
-import base64
 import json
+import base64
+import hashlib
+import time
+from typing import Optional, Dict, Any, Tuple
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+
 from openai import OpenAI
 
-# --------------------------------------------------
-# 🔑 OpenAI-Client
-# --------------------------------------------------
+# =========================
+# Config
+# =========================
+APP_NAME = "GrowDoctor Backend (Beta - Diagnose Only)"
+DEFAULT_LANG = "de"
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    raise RuntimeError(
-        "OPENAI_API_KEY ist nicht gesetzt. Bitte als Environment Variable hinterlegen."
+    raise RuntimeError("OPENAI_API_KEY ist nicht gesetzt. Bitte als Environment Variable in Render setzen.")
+
+MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+
+# Max upload size (bytes) - keep it reasonable for Render free
+MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", str(8 * 1024 * 1024)))  # 8 MB
+
+# "Already analyzed" cache TTL
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", str(30 * 24 * 3600)))  # 30 days
+
+# =========================
+# Simple in-memory caches (ok for Beta)
+# NOTE: Render free instances can restart -> counters reset.
+# =========================
+analysis_cache: Dict[str, Dict[str, Any]] = {}   # sha256 -> {ts, result, meta}
+usage_counters: Dict[str, int] = {
+    "diagnose_requests": 0,
+    "unique_clients": 0,
+}
+seen_clients: Dict[str, float] = {}  # client_id_hash -> first_seen_ts
+
+
+# =========================
+# i18n text snippets (Beta)
+# =========================
+I18N = {
+    "de": {
+        "disclaimer_title": "Wichtiger Hinweis",
+        "disclaimer_body": "Diese App liefert eine KI-basierte Einschätzung anhand von Fotos. Sie ersetzt keinen fachlichen Rat. Bei starken Symptomen oder Unsicherheit: bitte einen erfahrenen Grower/Experten hinzuziehen.",
+        "privacy_title": "Datenschutz",
+        "privacy_body": "Fotos werden nur zur Analyse an den KI-Dienst übertragen und von uns nicht gespeichert. Es werden keine personenbezogenen Daten benötigt. Optional kann eine anonyme Client-ID zur Nutzungsstatistik gesendet werden.",
+        "age_error": "Altersbestätigung fehlt. Nutzung erst ab 18 Jahren.",
+        "file_error": "Ungültige Datei. Bitte ein Bild (jpg/png/webp) hochladen.",
+        "too_large": "Bild ist zu groß. Bitte ein kleineres Foto hochladen.",
+        "already_analyzed": "Dieses Bild wurde schon analysiert.",
+        "reanalyze_hint": "Du kannst trotzdem neu analysieren (force=true).",
+        "quality_tips_title": "Foto-Tipps",
+        "quality_tips_body": "1) Ganzes Pflanzenbild + 2) Nahaufnahme der betroffenen Stelle. Gute Beleuchtung, scharf, ohne Filter, ruhig halten. Bei Unterseite: Blatt umdrehen und fokussieren.",
+    },
+    "en": {
+        "disclaimer_title": "Important notice",
+        "disclaimer_body": "This app provides an AI-based estimate from photos. It does not replace expert advice. If symptoms are severe or you are unsure, consult an experienced grower/expert.",
+        "privacy_title": "Privacy",
+        "privacy_body": "Photos are only sent for analysis and are not stored by us. No personal data is required. Optionally, an anonymous client ID may be sent for usage statistics.",
+        "age_error": "Age confirmation missing. 18+ only.",
+        "file_error": "Invalid file. Please upload an image (jpg/png/webp).",
+        "too_large": "Image is too large. Please upload a smaller photo.",
+        "already_analyzed": "This image was analyzed before.",
+        "reanalyze_hint": "You can still reanalyze (force=true).",
+        "quality_tips_title": "Photo tips",
+        "quality_tips_body": "1) Full plant photo + 2) close-up of affected area. Good light, sharp focus, no filters, keep steady. For underside: flip leaf and focus.",
+    },
+    "it": {
+        "disclaimer_title": "Avviso importante",
+        "disclaimer_body": "Questa app fornisce una valutazione basata su IA dalle foto. Non sostituisce un esperto. Se i sintomi sono gravi o hai dubbi, consulta un esperto.",
+        "privacy_title": "Privacy",
+        "privacy_body": "Le foto vengono inviate solo per l’analisi e non vengono salvate da noi. Non servono dati personali. Facoltativamente puoi inviare un ID anonimo per statistiche d’uso.",
+        "age_error": "Conferma età mancante. Solo 18+.",
+        "file_error": "File non valido. Carica un’immagine (jpg/png/webp).",
+        "too_large": "Immagine troppo grande. Carica una foto più piccola.",
+        "already_analyzed": "Questa immagine è stata già analizzata.",
+        "reanalyze_hint": "Puoi comunque rianalizzare (force=true).",
+        "quality_tips_title": "Consigli foto",
+        "quality_tips_body": "1) Foto intera pianta + 2) zoom sulla parte colpita. Buona luce, fuoco nitido, senza filtri, mano ferma. Sottofoglia: gira la foglia e metti a fuoco.",
+    },
+    "fr": {
+        "disclaimer_title": "Avis important",
+        "disclaimer_body": "Cette app fournit une estimation IA à partir de photos. Elle ne remplace pas un avis expert. En cas de symptômes sévères ou de doute, consultez un expert.",
+        "privacy_title": "Confidentialité",
+        "privacy_body": "Les photos sont envoyées uniquement pour l’analyse et ne sont pas stockées par nous. Aucune donnée personnelle requise. Optionnel : un ID anonyme pour les statistiques d’usage.",
+        "age_error": "Confirmation d’âge manquante. 18+ uniquement.",
+        "file_error": "Fichier invalide. Téléversez une image (jpg/png/webp).",
+        "too_large": "Image trop lourde. Téléversez une photo plus petite.",
+        "already_analyzed": "Cette image a déjà été analysée.",
+        "reanalyze_hint": "Vous pouvez quand même relancer l’analyse (force=true).",
+        "quality_tips_title": "Conseils photo",
+        "quality_tips_body": "1) Photo plante entière + 2) gros plan zone touchée. Bonne lumière, net, sans filtre, main stable. Dessous: retourner la feuille et faire le focus.",
+    },
+    "es": {
+        "disclaimer_title": "Aviso importante",
+        "disclaimer_body": "Esta app ofrece una estimación con IA basada en fotos. No sustituye a un experto. Si los síntomas son fuertes o hay dudas, consulta a un experto.",
+        "privacy_title": "Privacidad",
+        "privacy_body": "Las fotos solo se envían para el análisis y no las guardamos. No se requieren datos personales. Opcional: un ID anónimo para estadísticas de uso.",
+        "age_error": "Falta confirmación de edad. Solo 18+.",
+        "file_error": "Archivo inválido. Sube una imagen (jpg/png/webp).",
+        "too_large": "La imagen es demasiado grande. Sube una foto más pequeña.",
+        "already_analyzed": "Esta imagen ya fue analizada.",
+        "reanalyze_hint": "Aun así puedes re-analizar (force=true).",
+        "quality_tips_title": "Consejos de foto",
+        "quality_tips_body": "1) Foto planta completa + 2) primer plano de la zona afectada. Buena luz, enfoque nítido, sin filtros, mano estable. En el envés: girar hoja y enfocar.",
+    },
+    "pt": {
+        "disclaimer_title": "Aviso importante",
+        "disclaimer_body": "Este app fornece uma estimativa por IA com base em fotos. Não substitui um especialista. Se os sintomas forem fortes ou houver dúvida, procure um especialista.",
+        "privacy_title": "Privacidade",
+        "privacy_body": "As fotos são enviadas apenas para análise e não são guardadas por nós. Não são necessários dados pessoais. Opcional: um ID anónimo para estatísticas.",
+        "age_error": "Falta confirmação de idade. Apenas 18+.",
+        "file_error": "Ficheiro inválido. Envie uma imagem (jpg/png/webp).",
+        "too_large": "Imagem demasiado grande. Envie uma foto menor.",
+        "already_analyzed": "Esta imagem já foi analisada.",
+        "reanalyze_hint": "Ainda podes reanalisar (force=true).",
+        "quality_tips_title": "Dicas de foto",
+        "quality_tips_body": "1) Foto da planta inteira + 2) zoom da zona afetada. Boa luz, foco nítido, sem filtros, mão firme. Parte de baixo: virar a folha e focar.",
+    },
+    "nl": {
+        "disclaimer_title": "Belangrijke melding",
+        "disclaimer_body": "Deze app geeft een AI-inschatting op basis van foto’s. Dit vervangt geen expertadvies. Bij ernstige symptomen of twijfel: raadpleeg een expert.",
+        "privacy_title": "Privacy",
+        "privacy_body": "Foto’s worden alleen voor analyse verzonden en door ons niet opgeslagen. Geen persoonsgegevens nodig. Optioneel: anonieme client-ID voor gebruiksstatistiek.",
+        "age_error": "Leeftijdsbevestiging ontbreekt. Alleen 18+.",
+        "file_error": "Ongeldig bestand. Upload een afbeelding (jpg/png/webp).",
+        "too_large": "Afbeelding is te groot. Upload een kleinere foto.",
+        "already_analyzed": "Deze afbeelding is al eerder geanalyseerd.",
+        "reanalyze_hint": "Je kunt toch opnieuw analyseren (force=true).",
+        "quality_tips_title": "Fototips",
+        "quality_tips_body": "1) Hele plant + 2) close-up van het probleem. Goed licht, scherp, geen filters, stil houden. Onderkant: blad omdraaien en scherpstellen.",
+    },
+    "cs": {
+        "disclaimer_title": "Důležité upozornění",
+        "disclaimer_body": "Aplikace poskytuje odhad pomocí AI z fotek. Nenahrazuje odborníka. Při silných příznacích nebo nejistotě kontaktujte experta.",
+        "privacy_title": "Soukromí",
+        "privacy_body": "Fotky se posílají jen k analýze a neukládáme je. Nejsou potřeba osobní údaje. Volitelně anonymní ID pro statistiky použití.",
+        "age_error": "Chybí potvrzení věku. Pouze 18+.",
+        "file_error": "Neplatný soubor. Nahrajte obrázek (jpg/png/webp).",
+        "too_large": "Obrázek je příliš velký. Nahrajte menší.",
+        "already_analyzed": "Tento obrázek už byl analyzován.",
+        "reanalyze_hint": "Můžete i tak znovu analyzovat (force=true).",
+        "quality_tips_title": "Tipy na fotku",
+        "quality_tips_body": "1) Celá rostlina + 2) detail postižené části. Dobré světlo, ostře, bez filtrů. Spodek: otočit list a zaostřit.",
+    },
+    "pl": {
+        "disclaimer_title": "Ważna informacja",
+        "disclaimer_body": "Ta aplikacja daje ocenę AI na podstawie zdjęć. Nie zastępuje eksperta. Przy silnych objawach lub wątpliwościach skonsultuj się z ekspertem.",
+        "privacy_title": "Prywatność",
+        "privacy_body": "Zdjęcia są wysyłane tylko do analizy i nie są przez nas zapisywane. Nie są wymagane dane osobowe. Opcjonalnie anonimowe ID do statystyk użycia.",
+        "age_error": "Brak potwierdzenia wieku. Tylko 18+.",
+        "file_error": "Nieprawidłowy plik. Prześlij obraz (jpg/png/webp).",
+        "too_large": "Zdjęcie jest za duże. Prześlij mniejsze.",
+        "already_analyzed": "To zdjęcie było już analizowane.",
+        "reanalyze_hint": "Możesz mimo to ponowić analizę (force=true).",
+        "quality_tips_title": "Wskazówki foto",
+        "quality_tips_body": "1) Cała roślina + 2) zbliżenie problemu. Dobre światło, ostro, bez filtrów. Spód: odwróć liść i ustaw ostrość.",
+    },
+}
+
+
+def t(lang: str, key: str) -> str:
+    lang = (lang or DEFAULT_LANG).lower().strip()
+    if lang not in I18N:
+        lang = DEFAULT_LANG
+    return I18N[lang].get(key, I18N[DEFAULT_LANG].get(key, key))
+
+
+# =========================
+# Helpers
+# =========================
+def _cleanup_cache() -> None:
+    now = time.time()
+    expired = [k for k, v in analysis_cache.items() if now - v.get("ts", 0) > CACHE_TTL_SECONDS]
+    for k in expired:
+        analysis_cache.pop(k, None)
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _hash_client_id(client_id: str) -> str:
+    # Store only hashed id (privacy-friendly)
+    return hashlib.sha256(client_id.encode("utf-8")).hexdigest()
+
+
+def _validate_image(upload: UploadFile, data: bytes) -> None:
+    if upload.content_type not in ("image/jpeg", "image/png", "image/webp"):
+        raise HTTPException(status_code=400, detail="file_error")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="too_large")
+
+
+def _to_data_url(upload: UploadFile, data: bytes) -> str:
+    mime = upload.content_type or "image/jpeg"
+    b64 = base64.b64encode(data).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
+
+
+def _extract_json(text: str) -> Dict[str, Any]:
+    """
+    Best-effort JSON extraction:
+    - If model returns pure JSON -> parse directly
+    - Else find first {...} block
+    """
+    text = (text or "").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        chunk = text[start:end + 1]
+        try:
+            return json.loads(chunk)
+        except Exception:
+            return {}
+    return {}
+
+
+def _diagnose_prompt(lang: str, photo_position: str, shot_type: str) -> Tuple[str, str]:
+    """
+    system_prompt, user_prompt
+    """
+    system_prompt = (
+        "Du bist ein sehr erfahrener Cannabis-Pflanzen-Analyst.\n"
+        "WICHTIG:\n"
+        "- Gib NUR JSON zurück, ohne Markdown, ohne zusätzliche Texte.\n"
+        "- Wenn es KEIN Cannabis ist oder nicht erkennbar: ist_cannabis=false.\n"
+        "- Erkenne auch Überwässerung und Unterwässerung.\n"
+        "- Berücksichtige die Fotoposition (oben/mitte/unten/unterseite) und Shot-Typ (ganze_pflanze / nahaufnahme).\n"
+        "- Keine Anbau- oder Konsumanleitung. Nur Analyse des sichtbaren Zustands.\n"
+        "- Bei starken Problemen: empfehle Experten/erfahrenen Grower hinzuzuziehen.\n"
     )
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+    user_prompt = (
+        f"Foto-Kontext:\n"
+        f"- Fotoposition: {photo_position}\n"
+        f"- Shot-Typ: {shot_type}\n\n"
+        "Aufgabe:\n"
+        "1) Prüfe, ob es Cannabis ist.\n"
+        "2) Wenn Cannabis: bestimme ein Hauptproblem (nur 1) und ordne eine Kategorie zu.\n"
+        "   Kategorien: naehrstoffmangel, naehrstoffueberschuss, bewaesserung, schaedlinge, pilz, licht_hitze, kaelte, pH_EC, umweltstress, sonstiges, kein_problem\n"
+        "3) Gib konkrete, knappe Hinweise zur nächsten sinnvollen Aktion (ohne detaillierte Anleitung).\n"
+        "4) Wenn Foto zu unscharf/zu weit weg: setze qualitaet_ok=false und gib Foto-Tipps.\n\n"
+        "JSON Schema (genau diese Keys):\n"
+        "{\n"
+        '  "ist_cannabis": boolean,\n'
+        '  "sicherheit": {\n'
+        '    "haertung": "low|medium|high",\n'
+        '    "hinweis_experte": boolean,\n'
+        '    "haftungsausschluss_kurz": string\n'
+        "  },\n"
+        '  "qualitaet": {\n'
+        '    "qualitaet_ok": boolean,\n'
+        '    "gruende": [string],\n'
+        '    "foto_tipps": [string]\n'
+        "  },\n"
+        '  "analyse": {\n'
+        '    "hauptproblem": string,\n'
+        '    "kategorie": string,\n'
+        '    "wahrscheinlichkeit": 0-100,\n'
+        '    "symptome": [string],\n'
+        '    "moegliche_ursachen": [string]\n'
+        "  },\n"
+        '  "empfehlung": {\n'
+        '    "kurz": string,\n'
+        '    "naechste_schritte": [string],\n'
+        '    "wann_experte": string\n'
+        "  }\n"
+        "}\n"
+    )
 
-# --------------------------------------------------
-# 🌐 FastAPI-App
-# --------------------------------------------------
-app = FastAPI(
-    title="Canalyzer Backend",
-    description="Bildbasierte Cannabis-Diagnose-API (Diagnose + Reifegrad)",
-    version="2.0.0",
-)
+    return system_prompt, user_prompt
+
+
+# =========================
+# FastAPI app
+# =========================
+app = FastAPI(title=APP_NAME)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # für Entwicklung ok, später einschränken
+    allow_origins=["*"],  # Beta: ok. Später einschränken.
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+client = OpenAI(api_key=OPENAI_API_KEY)
+
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Canalyzer Backend läuft 😎"}
+    return {
+        "status": "ok",
+        "service": APP_NAME,
+        "model": MODEL_NAME,
+    }
 
 
-# --------------------------------------------------
-# 🧾 Prompts
-# --------------------------------------------------
-
-DIAGNOSIS_PROMPT = """
-Du bist ein sehr erfahrener Cannabis-Pflanzenarzt.
-
-Du bekommst ein Foto einer Cannabis-Pflanze (Indoor oder Outdoor).
-Deine Aufgabe: Erkenne das wichtigste Problem (NUR EIN Hauptproblem auswählen), z.B.:
-- Nährstoffmangel
-- Nährstoffüberschuss
-- Schädlingsbefall
-- Pilzbefall
-- Umweltstress
-- oder: kein akutes Problem erkennbar
-
-WICHTIG – Unterschied zwischen TRICHOMEN und SCHIMMEL:
-
-- Trichome:
-  - kleine, glitzernde Harzdrüsen (wie Frost / Kristalle)
-  - sitzen dicht auf Blüten und Zuckerblättern
-  - wirken wie viele kleine Punkte oder Pilzstiele mit Köpfen
-  - können weiß, milchig oder bernsteinfarben sein
-  - können auf Fotos wie „zuckerig bestäubt“ oder wie Mehltau wirken, sind aber NORMAL
-
-- Echter Schimmel / Mehltau:
-  - wirkt flauschig, wattig, wolkig oder pulvrig
-  - überzieht die Oberfläche wie ein Belag
-  - verdeckt teilweise die Pflanzenstruktur
-  - die Flächen sehen ungleichmäßig, „angefressen“ oder verrottet aus
-
-REGEL:
-- Wenn die weißen Strukturen wie dichte Trichome wirken (kristall-artig, frostig, viele Punkte),
-  dann DARFST du NICHT „Schimmel“ diagnostizieren.
-- Nur wenn ganz klar eine flauschige, wattige oder pulvrige Struktur zu sehen ist,
-  darfst du „Pilzbefall / Schimmel“ als Hauptproblem wählen.
-- Wenn du unsicher bist, ob es Schimmel oder nur viele Trichome sind,
-  entscheide dich NICHT für Schimmel. Schreibe in die Beschreibung,
-  dass die Trichome möglicherweise nur sehr dicht stehen.
-
-Bildqualität:
-- Wenn das Bild extrem unscharf ist oder nur ein winziger Ausschnitt gezeigt wird,
-  darfst du die Bildqualität kritisieren und eine niedrige Wahrscheinlichkeit setzen.
-- Wenn Pflanze / Blätter / Blüten aber gut erkennbar sind, behandle die Bildqualität als ausreichend
-  und gib eine normale Diagnose.
-
-Wenn du wirklich kein klares Problem erkennen kannst:
-- Setze als Hauptproblem z.B. „kein akutes Problem erkennbar“
-- Kategorie: „kein_problem“
-- niedrige Wahrscheinlichkeit
-
-ANTWORTE IMMER als gültiges JSON mit GENAU diesem Schema:
-
-{
-  "ist_cannabis": true/false,
-  "hauptproblem": "kurzer Titel des wichtigsten Problems oder 'kein akutes Problem erkennbar'",
-  "kategorie": "mangel|überschuss|schädling|pilz|stress|unbekannt|kein_problem",
-  "beschreibung": "Was ist auf dem Bild zu sehen und warum kommst du zu dieser Diagnose?",
-  "wahrscheinlichkeit": 0-100,
-  "schweregrad": "leicht|mittel|stark|kein_problem",
-  "stadium": "keimling|wachstum|blüte|egal",
-  "betroffene_teile": ["z.B. untere_blaetter", "obere_triebe"],
-  "dringlichkeit": "niedrig|mittel|hoch|sofort_handeln",
-  "empfohlene_kontrolle_in_tagen": 0-30,
-  "alternativen": [
-    {"problem": "anderes mögliches Problem", "wahrscheinlichkeit": 0-100}
-  ],
-  "sofort_massnahmen": ["konkreter Schritt 1", "konkreter Schritt 2"],
-  "vorbeugung": ["konkreter Tipp 1", "konkreter Tipp 2"],
-  "bildqualitaet_score": 0-100,
-  "hinweis_bildqualitaet": "Hinweis zur Qualität des Fotos und ggf. Verbesserungsvorschläge",
-  "foto_empfehlungen": [
-    "konkrete Empfehlungen für weitere Fotos (z.B. Blattunterseite, Makroaufnahme)"
-  ]
-}
-"""
-
-RIPENESS_PROMPT = """
-Du bist ein hochspezialisierter Cannabis-Ernteassistent.
-
-DU BEURTEILST NUR DEN REIFEGRAD DER BLÜTE ANHAND DER TRICHOME.
-Du sollst KEINE Krankheiten, keinen Schimmel und keine Nährstoffmängel diagnostizieren.
-
-Du bekommst ein MAKRO-Foto von Trichomen auf einer Cannabis-Blüte.
-
-WICHTIG:
-- Trichome = Harzdrüsen / kleine glitzernde „Pilze“ auf Blüte und Blättern.
-- Sie können sehr dicht stehen und auf Fotos wie Mehltau oder Schimmel wirken – sind aber NORMAL.
-- Du darfst in diesem Modus NIEMALS „Schimmel“ oder „Pilzbefall“ diagnostizieren.
-- Auch wenn die Trichome wie weißer Belag aussehen: behandle sie als Trichome, solange keine typische
-  flauschige, wattige oder verrottete Struktur zu sehen ist.
-
-Deine Aufgaben:
-
-1. Schätze die Verteilung der Trichome:
-   - Anteil KLAR (%) 0–100
-   - Anteil MILCHIG (%) 0–100
-   - Anteil BERNSTEIN (%) 0–100
-   Die Summe darf ungefähr 100 % ergeben.
-
-2. Bestimme eine Reifegrad-Stufe:
-   - "zu früh"    → überwiegend klare Trichome
-   - "optimal"    → überwiegend milchige Trichome
-   - "spät"       → sehr viele bernsteinfarbene Trichome
-
-3. Empfohlene Tage bis Ernte:
-   - Wenn schon optimal: 0 Tage.
-   - Wenn noch zu früh: positive Zahl (z.B. 5 = noch ca. 5 Tage bis optimal).
-   - Wenn deutlich überreif: negative Zahl (z.B. -3 = etwa 3 Tage über dem optimalen Zeitpunkt).
-
-4. Empfehlung:
-   - "weiter reifen lassen"
-   - "jetzt ernten"
-   - "schnellstmöglich ernten"
-
-5. Kurzbeschreibung:
-   - Erkläre in 2–5 Sätzen, wie die Trichome ungefähr verteilt sind
-     und warum du zu diesem Reifegrad kommst.
-
-Wenn das Foto extrem unscharf ist oder man kaum Trichome erkennt:
-- Gib eine sehr vorsichtige Einschätzung ab.
-- Setze "empfohlene_tage_bis_ernte" auf 0.
-- Setze "reifegrad_stufe" auf "zu früh".
-- Empfehlung: "weiter reifen lassen".
-- Erkläre in der Beschreibung, dass das Foto für eine genaue Beurteilung ungeeignet ist
-  und dass der Nutzer ein schärferes Makro mit Fokus auf den Trichomen machen soll.
-
-ANTWORTE IMMER als gültiges JSON mit GENAU DIESEM SCHEMA:
-
-{
-  "reifegrad_stufe": "zu früh" | "optimal" | "spät",
-  "beschreibung": "kurze Erklärung, was du an den Trichomen erkennst",
-  "empfohlene_tage_bis_ernte": ganze Zahl (negativ, 0 oder positiv),
-  "empfehlung": "weiter reifen lassen" | "jetzt ernten" | "schnellstmöglich ernten",
-  "trichom_anteile": {
-    "klar": ganze Zahl (0-100),
-    "milchig": ganze Zahl (0-100),
-    "bernstein": ganze Zahl (0-100)
-  }
-}
-"""
+@app.get("/legal")
+def legal(lang: str = DEFAULT_LANG):
+    """
+    Backend liefert Texte für App-Seiten (ohne Website nötig).
+    """
+    return {
+        "lang": (lang or DEFAULT_LANG),
+        "disclaimer_title": t(lang, "disclaimer_title"),
+        "disclaimer_body": t(lang, "disclaimer_body"),
+        "privacy_title": t(lang, "privacy_title"),
+        "privacy_body": t(lang, "privacy_body"),
+        "quality_tips_title": t(lang, "quality_tips_title"),
+        "quality_tips_body": t(lang, "quality_tips_body"),
+    }
 
 
-# --------------------------------------------------
-# 🧠 Hilfsfunktion: OpenAI-Call (gpt-4.1-mini)
-# --------------------------------------------------
-
-
-def _call_openai_json(system_prompt: str, data_url: str, user_text: str) -> dict:
-  try:
-      response = client.chat.completions.create(
-          model="gpt-4.1-mini",
-          messages=[
-              {"role": "system", "content": system_prompt},
-              {
-                  "role": "user",
-                  "content": [
-                      {"type": "text", "text": user_text},
-                      {"type": "image_url", "image_url": {"url": data_url}},
-                  ],
-              },
-          ],
-          response_format={"type": "json_object"},
-          max_tokens=900,
-          temperature=0.1,
-      )
-  except Exception as e:
-      msg = str(e)
-      if "rate_limit" in msg or "rate_limit_exceeded" in msg:
-          raise HTTPException(
-              status_code=429,
-              detail="OpenAI-Ratelimit erreicht – bitte später erneut versuchen.",
-          )
-      raise HTTPException(
-          status_code=500,
-          detail=f"Fehler bei der Anfrage an OpenAI: {e}",
-      )
-
-  raw = response.choices[0].message.content
-  try:
-      return json.loads(raw)
-  except json.JSONDecodeError:
-      raise HTTPException(
-          status_code=500,
-          detail="OpenAI hat kein gültiges JSON zurückgegeben.",
-      )
-
-
-# --------------------------------------------------
-# 📸 ENDPOINT 1: Allgemeine Diagnose
-# --------------------------------------------------
+@app.get("/metrics")
+def metrics():
+    """
+    Simple anonymous usage stats (Beta).
+    """
+    _cleanup_cache()
+    return {
+        "diagnose_requests": usage_counters.get("diagnose_requests", 0),
+        "unique_clients": usage_counters.get("unique_clients", 0),
+        "cache_size": len(analysis_cache),
+        "note": "Render free instances may reset; use app analytics for downloads.",
+    }
 
 
 @app.post("/diagnose")
-async def diagnose(image: UploadFile = File(...)):
-    """
-    Erkennt Probleme wie Mängel, Schädlinge, Stress etc.
-    """
-
-    if image.content_type not in ("image/jpeg", "image/png"):
-        raise HTTPException(status_code=400, detail="Nur JPG und PNG sind erlaubt.")
-
-    img_bytes = await image.read()
-    img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-    data_url = f"data:{image.content_type};base64,{img_base64}"
-
-    user_text = (
-        "Analysiere dieses Bild der Cannabis-Pflanze und gib nur das JSON im Schema zurück."
-    )
-
-    result = _call_openai_json(
-        DIAGNOSIS_PROMPT,
-        data_url,
-        user_text,
-    )
-
-    # Alternativen filtern: alles < 45 % raus
-    alternativen = result.get("alternativen") or []
-    gefiltert = []
-    for alt in alternativen:
-        try:
-            w = alt.get("wahrscheinlichkeit", 0)
-            if isinstance(w, (int, float)) and w >= 45:
-                gefiltert.append(alt)
-        except Exception:
-            continue
-    result["alternativen"] = gefiltert
-
-    return result
-
-
-# --------------------------------------------------
-# 🌼 ENDPOINT 2: Reifegrad / Trichome
-# --------------------------------------------------
-
-
-@app.post("/ripeness")
-async def ripeness(
+async def diagnose(
     image: UploadFile = File(...),
-    preference: str = Form("balanced"),  # "energetic" | "balanced" | "couchlock"
+    lang: str = Form(DEFAULT_LANG),
+    age_confirmed: bool = Form(False),
+    photo_position: str = Form("unknown"),  # top|middle|bottom|underside|unknown
+    shot_type: str = Form("unknown"),       # whole_plant|closeup|unknown
+    client_id: Optional[str] = Form(None),  # anonymous client id from app (optional)
+    force: bool = Form(False),              # reanalyze even if already analyzed
 ):
-    """
-    Bewertet NUR den Reifegrad der Blüte anhand der Trichome.
-    """
+    # 1) Age gate
+    if not age_confirmed:
+        raise HTTPException(status_code=403, detail="age_error")
 
-    if image.content_type not in ("image/jpeg", "image/png"):
-        raise HTTPException(status_code=400, detail="Nur JPG und PNG sind erlaubt.")
+    # 2) Read file
+    data = await image.read()
+    _validate_image(image, data)
 
-    img_bytes = await image.read()
-    img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-    data_url = f"data:{image.content_type};base64,{img_base64}"
+    # 3) Track usage (anonymous)
+    usage_counters["diagnose_requests"] += 1
+    if client_id:
+        cid_hash = _hash_client_id(client_id)
+        if cid_hash not in seen_clients:
+            seen_clients[cid_hash] = time.time()
+            usage_counters["unique_clients"] += 1
 
-    # kleinen Text je nach Wunschwirkung bauen
-    if preference == "energetic":
-        pref_text = (
-            "Der Nutzer wünscht eine eher ENERGETISCHE, aktive Wirkung "
-            "(mehr klare/milchige Trichome, weniger bernsteinfarben). "
-            "Plane die Ernte eher FRÜHER im optimalen Fenster."
+    # 4) Cache check (same image)
+    _cleanup_cache()
+    img_hash = _sha256(data)
+    cached = analysis_cache.get(img_hash)
+
+    if cached and not force:
+        return {
+            "status": "ok",
+            "already_analyzed": True,
+            "message": t(lang, "already_analyzed"),
+            "hint": t(lang, "reanalyze_hint"),
+            "image_hash": img_hash,
+            "result": cached.get("result", {}),
+            "legal": {
+                "disclaimer_title": t(lang, "disclaimer_title"),
+                "disclaimer_body": t(lang, "disclaimer_body"),
+                "privacy_title": t(lang, "privacy_title"),
+                "privacy_body": t(lang, "privacy_body"),
+            },
+        }
+
+    # 5) OpenAI call (image + prompt)
+    data_url = _to_data_url(image, data)
+    system_prompt, user_prompt = _diagnose_prompt(lang, photo_position, shot_type)
+
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_prompt},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                },
+            ],
+            temperature=0.2,
         )
-    elif preference == "couchlock":
-        pref_text = (
-            "Der Nutzer wünscht eine starke, SEDIERENDE Couchlock-Wirkung "
-            "(viele bernsteinfarbene Trichome). "
-            "Plane die Ernte eher SPÄTER im optimalen Fenster."
-        )
-    else:
-        pref_text = (
-            "Der Nutzer wünscht eine AUSGEGLICHENE Wirkung "
-            "(Mischung aus milchigen und etwas bernsteinfarbenen Trichomen)."
-        )
+        content = resp.choices[0].message.content or ""
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"openai_error: {str(e)}")
 
-    user_text = (
-        "Analysiere NUR den Reifegrad der Blüte anhand der Trichome. "
-        "Berücksichtige folgende Wunschwirkung des Nutzers: "
-        f"{pref_text}"
-    )
+    result_json = _extract_json(content)
 
-    result = _call_openai_json(
-        RIPENESS_PROMPT,
-        data_url,
-        user_text,
-    )
+    # 6) Minimal safety defaults if model output missing fields
+    if "sicherheit" not in result_json:
+        result_json["sicherheit"] = {
+            "haertung": "medium",
+            "hinweis_experte": True,
+            "haftungsausschluss_kurz": t(lang, "disclaimer_body"),
+        }
+    if "qualitaet" not in result_json:
+        result_json["qualitaet"] = {
+            "qualitaet_ok": False,
+            "gruende": [],
+            "foto_tipps": [t(lang, "quality_tips_body")],
+        }
 
-    # Sanity-Checks & Defaults
-    stage = result.get("reifegrad_stufe")
-    if not isinstance(stage, str) or not stage.strip():
-        stage = "zu früh"
-    result["reifegrad_stufe"] = stage.strip()
+    # 7) Store in cache (no photo storage, only hash+result)
+    analysis_cache[img_hash] = {
+        "ts": time.time(),
+        "result": result_json,
+        "meta": {
+            "content_type": image.content_type,
+            "bytes": len(data),
+        },
+    }
 
-    days = result.get("empfohlene_tage_bis_ernte", 0)
-    if not isinstance(days, int):
-        try:
-            days = int(days)
-        except Exception:
-            days = 0
-    result["empfohlene_tage_bis_ernte"] = days
-
-    rec = result.get("empfehlung")
-    if not isinstance(rec, str) or not rec.strip():
-        if days > 1:
-            rec = "weiter reifen lassen"
-        elif days < -1:
-            rec = "schnellstmöglich ernten"
-        else:
-            rec = "jetzt ernten"
-    result["empfehlung"] = rec.strip()
-
-    ta = result.get("trichom_anteile") or {}
-    safe_ta = {}
-    for key in ["klar", "milchig", "bernstein"]:
-        val = ta.get(key, 0)
-        if not isinstance(val, int):
-            try:
-                val = int(val)
-            except Exception:
-                val = 0
-        if val < 0:
-            val = 0
-        if val > 100:
-            val = 100
-        safe_ta[key] = val
-    result["trichom_anteile"] = safe_ta
-
-    return result
-
+    return {
+        "status": "ok",
+        "already_analyzed": False,
+        "image_hash": img_hash,
+        "result": result_json,
+        "legal": {
+            "disclaimer_title": t(lang, "disclaimer_title"),
+            "disclaimer_body": t(lang, "disclaimer_body"),
+            "privacy_title": t(lang, "privacy_title"),
+            "privacy_body": t(lang, "privacy_body"),
+        },
+    }

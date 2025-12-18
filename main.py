@@ -40,12 +40,12 @@ def root():
 
 
 # --------------------------------------------------
-# 🧠 OpenAI Helper – JETZT korrekt mit gpt-4o-mini
+# 🧠 OpenAI Helper – JETZT korrekt mit gpt-4.1-mini
 # --------------------------------------------------
 def _call_openai_json(system_prompt: str, data_url: str, user_text: str) -> dict:
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {

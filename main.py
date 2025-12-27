@@ -233,53 +233,137 @@ def _diagnose_prompt(lang: str, photo_position: str, shot_type: str) -> Tuple[st
     system_prompt, user_prompt
     """
     system_prompt = (
-        "Du bist ein sehr erfahrener Cannabis-Pflanzen-Analyst.\n"
-        "WICHTIG:\n"
-        "- Gib NUR JSON zurück, ohne Markdown, ohne zusätzliche Texte.\n"
-        "- Wenn es KEIN Cannabis ist oder nicht erkennbar: ist_cannabis=false.\n"
-        "- Erkenne auch Überwässerung und Unterwässerung.\n"
-        "- Berücksichtige die Fotoposition (oben/mitte/unten/unterseite) und Shot-Typ (ganze_pflanze / nahaufnahme).\n"
-        "- Keine Anbau- oder Konsumanleitung. Nur Analyse des sichtbaren Zustands.\n"
-        "- Bei starken Problemen: empfehle Experten/erfahrenen Grower hinzuzuziehen.\n"
-    )
+    "Du bist ein hochspezialisierter Cannabis-Grow-Diagnose-Experte.\n"
+    "Analysiere AUSSCHLIESSLICH sichtbare Merkmale im Foto.\n\n"
+
+    "WICHTIG – absolute Prioritäten:\n"
+    "- Gib IMMER reines JSON zurück, ohne Markdown, ohne Zusatztext.\n"
+    "- Verwechsle NÄHRSTOFF-ÜBERSCHUSS NICHT mit MANGEL.\n"
+    "- Wenn Symptome für Mangel UND Überschuss passen könnten:\n"
+    "  → markiere UNSICHERHEIT\n"
+    "  → liefere ZWEI Diagnosen (primary + secondary) mit Wahrscheinlichkeiten (Summe = 100).\n\n"
+
+    "SICHTBARE UNTERSCHIEDE (bindend):\n"
+    "- MANGEL:\n"
+    "  - eher gleichmäßige Aufhellung\n"
+    "  - beginnt häufig an unteren Blättern\n"
+    "  - kein starkes Glänzen\n"
+    "- ÜBERSCHUSS / TOX:\n"
+    "  - sehr dunkles Grün\n"
+    "  - glänzende / ledrige Blätter\n"
+    "  - Clawing (Blätter haken nach unten)\n"
+    "- LOCKOUT:\n"
+    "  - Mischsymptome mehrerer Mängel\n"
+    "  - fleckig / inkonsistent\n"
+    "  - oft Folge von pH / Salz / Überschuss\n\n"
+
+    "Regeln:\n"
+    "- KEINE Anbau- oder Konsumanleitung.\n"
+    "- NUR Zustandsanalyse.\n"
+    "- Berücksichtige Fotoposition und Shot-Typ.\n"
+    "- Bei starker Unsicherheit oder Gefahr:\n"
+    "  → hinweis_experte = true\n"
+)
+
 
     user_prompt = (
-        f"Foto-Kontext:\n"
-        f"- Fotoposition: {photo_position}\n"
-        f"- Shot-Typ: {shot_type}\n\n"
-        "Aufgabe:\n"
-        "1) Prüfe, ob es Cannabis ist.\n"
-        "2) Wenn Cannabis: bestimme ein Hauptproblem (nur 1) und ordne eine Kategorie zu.\n"
-        "   Kategorien: naehrstoffmangel, naehrstoffueberschuss, bewaesserung, schaedlinge, pilz, licht_hitze, kaelte, pH_EC, umweltstress, sonstiges, kein_problem\n"
-        "3) Gib konkrete, knappe Hinweise zur nächsten sinnvollen Aktion (ohne detaillierte Anleitung).\n"
-        "4) Wenn Foto zu unscharf/zu weit weg: setze qualitaet_ok=false und gib Foto-Tipps.\n\n"
-        "JSON Schema (genau diese Keys):\n"
-        "{\n"
-        '  "ist_cannabis": boolean,\n'
-        '  "sicherheit": {\n'
-        '    "haertung": "low|medium|high",\n'
-        '    "hinweis_experte": boolean,\n'
-        '    "haftungsausschluss_kurz": string\n'
-        "  },\n"
-        '  "qualitaet": {\n'
-        '    "qualitaet_ok": boolean,\n'
-        '    "gruende": [string],\n'
-        '    "foto_tipps": [string]\n'
-        "  },\n"
-        '  "analyse": {\n'
-        '    "hauptproblem": string,\n'
-        '    "kategorie": string,\n'
-        '    "wahrscheinlichkeit": 0-100,\n'
-        '    "symptome": [string],\n'
-        '    "moegliche_ursachen": [string]\n'
-        "  },\n"
-        '  "empfehlung": {\n'
-        '    "kurz": string,\n'
-        '    "naechste_schritte": [string],\n'
-        '    "wann_experte": string\n'
-        "  }\n"
-        "}\n"
-    )
+    "Foto-Kontext:\n"
+    f"- Fotoposition: {photo_position}\n"
+    f"- Shot-Typ: {shot_type}\n\n"
+
+    "AUFGABE:\n"
+    "1) Prüfe, ob auf dem Bild Cannabis zu sehen ist.\n"
+    "   - Wenn KEIN Cannabis oder nicht eindeutig erkennbar: setze ist_cannabis=false und stoppe die Analyse.\n\n"
+
+    "2) Wenn Cannabis:\n"
+    "   - Bestimme GENAU EIN Hauptproblem.\n"
+    "   - Ordne es EINER Kategorie zu:\n"
+    "     naehrstoffmangel | naehrstoffueberschuss | bewaesserung | schaedlinge | krankheit | umwelt | unbekannt\n\n"
+
+    "WICHTIGE ENTSCHEIDUNGSREGEL (sehr wichtig):\n"
+    "- Verwechsele Nährstoff-MANGEL NICHT mit Nährstoff-ÜBERSCHUSS.\n"
+    "- MANGEL:\n"
+    "  * eher hellgrün / gelblich\n"
+    "  * Chlorosen\n"
+    "  * beginnt oft an unteren Blättern\n"
+    "- ÜBERSCHUSS / TOXIZITÄT:\n"
+    "  * sehr dunkles Grün\n"
+    "  * glänzende, ledrige Blätter\n"
+    "  * Clawing (Blätter haken nach unten)\n"
+    "  * gehemmtes oder gestautes Wachstum\n"
+    "- Wenn Symptome für BEIDES passen:\n"
+    "  -> markiere die Diagnose als UNSICHER\n"
+    "  -> liefere ZWEI Diagnosen (primary + secondary)\n\n"
+
+    "3) Gib eine Wahrscheinlichkeit (0–100) für die Diagnose an.\n"
+    "   - Bei unsicherer Diagnose: Wahrscheinlichkeiten für primary + secondary angeben.\n"
+    "   - Die Summe aller Wahrscheinlichkeiten MUSS 100 ergeben.\n\n"
+
+    "4) Liste sichtbare Symptome und mögliche Ursachen.\n"
+    "   - Nur das, was auf dem Bild sichtbar ist.\n"
+    "   - Keine Vermutungen ohne Bildbezug.\n\n"
+
+    "5) Gib eine kurze, sichere Empfehlung:\n"
+    "   - KEINE detaillierten Anbau- oder Düngeanleitungen.\n"
+    "   - Nur nächste sinnvolle Schritte (z. B. prüfen, beobachten, Bild nachreichen).\n\n"
+
+    "6) Bildqualität prüfen:\n"
+    "   - Wenn das Foto unscharf, zu dunkel, zu weit weg oder unvollständig ist:\n"
+    "     * setze qualitaet_ok=false\n"
+    "     * erkläre kurz warum\n"
+    "     * gib konkrete Foto-Tipps (z. B. Blattunterseite, Gesamtpflanze, Nähe)\n\n"
+
+    "7) SICHERHEIT & HAFTUNG:\n"
+    "   - Wenn starke Probleme, Gefahren oder hohe Unsicherheit bestehen:\n"
+    "     * setze hinweis_experte=true\n"
+    "     * formuliere einen kurzen Haftungsausschluss\n"
+    "     * empfehle einen erfahrenen Grower oder Fachperson hinzuzuziehen\n\n"
+
+    "GIB AUSSCHLIESSLICH JSON ZURÜCK.\n"
+    "KEIN Markdown. KEIN Freitext. KEINE zusätzlichen Erklärungen.\n\n"
+
+    "JSON-SCHEMA (exakt diese Keys verwenden):\n"
+    "{\n"
+    "  \"ist_cannabis\": boolean,\n"
+    "  \"sicherheit\": {\n"
+    "    \"haertung\": \"low|medium|high\",\n"
+    "    \"hinweis_experte\": boolean,\n"
+    "    \"haftungsausschluss_kurz\": string\n"
+    "  },\n"
+    "  \"qualitaet\": {\n"
+    "    \"qualitaet_ok\": boolean,\n"
+    "    \"gruende\": [string],\n"
+    "    \"foto_tipps\": [string]\n"
+    "  },\n"
+    "  \"analyse\": {\n"
+    "    \"hauptproblem\": string,\n"
+    "    \"kategorie\": string,\n"
+    "    \"wahrscheinlichkeit\": number,\n"
+    "    \"symptome\": [string],\n"
+    "    \"moegliche_ursachen\": [string]\n"
+    "  },\n"
+    "  \"unsicherheit\": {\n"
+    "    \"ist_unsicher\": boolean,\n"
+    "    \"primary\": {\n"
+    "      \"kategorie\": string,\n"
+    "      \"hauptproblem\": string,\n"
+    "      \"wahrscheinlichkeit\": number\n"
+    "    },\n"
+    "    \"secondary\": {\n"
+    "      \"kategorie\": string,\n"
+    "      \"hauptproblem\": string,\n"
+    "      \"wahrscheinlichkeit\": number\n"
+    "    },\n"
+    "    \"benoetigte_fotos\": [string]\n"
+    "  },\n"
+    "  \"empfehlung\": {\n"
+    "    \"kurz\": string,\n"
+    "    \"naechste_schritte\": [string],\n"
+    "    \"wann_experte\": string\n"
+    "  }\n"
+    "}\n"
+)
+
 
     return system_prompt, user_prompt
 

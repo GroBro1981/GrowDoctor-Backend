@@ -524,14 +524,41 @@ async def diagnose(
     image: UploadFile = File(...),
     lang: str = Form(DEFAULT_LANG),
     age_confirmed: bool = Form(False),
-    photo_position: str = Form("unknown"),  # top|middle|bottom|underside|unknown
-    shot_type: str = Form("unknown"),       # whole_plant|closeup|unknown
-    client_id: Optional[str] = Form(None),  # anonymous client id from app (optional)
-    force: bool = Form(False),              # reanalyze even if already analyzed
+    photo_position: str = Form("unknown"),
+    shot_type: str = Form("unknown"),
+    client_id: Optional[str] = Form(None),
+    force: bool = Form(False),
 ):
+
+    # ---- normalize inputs (frontend/back compat) ----
+    photo_position = (photo_position or "unknown").lower().strip()
+    shot_type = (shot_type or "unknown").lower().strip()
+
+    shot_type_map = {
+        "whole": "whole_plant",
+        "whole_plant": "whole_plant",
+        "detail": "closeup",
+        "zoom": "closeup",
+        "closeup": "closeup",
+        "unknown": "unknown",
+    }
+    shot_type = shot_type_map.get(shot_type, "unknown")
+
+    pos_map = {
+        "top": "top",
+        "middle": "middle",
+        "bottom": "bottom",
+        "underside": "underside",
+        "under": "underside",
+        "unknown": "unknown",
+    }
+    photo_position = pos_map.get(photo_position, "unknown")
+    # -----------------------------------------------
+
     # 1) Age gate
     if not age_confirmed:
         raise HTTPException(status_code=403, detail="age_error")
+
 
     # 2) Read file
     data = await image.read()
@@ -558,6 +585,8 @@ async def diagnose(
             "hint": t(lang, "reanalyze_hint"),
             "image_hash": img_hash,
             "result": cached.get("result", {}),
+            "debug_photo_position": photo_position, 
+            "bebug_shot_type": shot_type,
             "legal": {
                 "disclaimer_title": t(lang, "disclaimer_title"),
                 "disclaimer_body": t(lang, "disclaimer_body"),
@@ -620,6 +649,8 @@ async def diagnose(
         "already_analyzed": False,
         "image_hash": img_hash,
         "result": result_json,
+        "debug_photo_position": photo_position, 
+        "bebug_shot_type": shot_type,
         "legal": {
             "disclaimer_title": t(lang, "disclaimer_title"),
             "disclaimer_body": t(lang, "disclaimer_body"),

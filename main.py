@@ -620,6 +620,43 @@ async def diagnose(
 
     result_json = _extract_json(content)
 
+            # --- GrowDoctor: Ursachenbasierte Sicherheitslogik ---
+    details_text = str(result_json.get("details", "")).lower()
+
+    sofort_text = " ".join(
+        m.lower() for m in result_json.get("sofortmassnahmen", [])
+        if isinstance(m, str)
+    )
+
+    problem_text = details_text + " " + sofort_text
+
+    lockout_keywords = [
+        "überwässer",
+        "staunässe",
+        "ph",
+        "lockout",
+        "wasserstress",
+        "stoffwechsel",
+        "aufnahme gestört",
+        "blockade",
+        "wurzelproblem",
+        "salz",
+        "ec"
+    ]
+
+    lockout_detected = any(k in problem_text for k in lockout_keywords)
+
+    if lockout_detected:
+        result_json["duenge_empfehlung"] = {
+            "erlaubt": False,
+            "grund": "Möglicher Nährstoff-Lockout oder pH-/Bewässerungsproblem erkannt.",
+            "hinweis": (
+                "Keine Düngeempfehlung, da zuerst pH-Wert, Bewässerung "
+                "und Wurzelzone stabilisiert werden müssen."
+            )
+        }
+
+
     # 6) Minimal safety defaults if model output missing fields
     if "sicherheit" not in result_json:
         result_json["sicherheit"] = {

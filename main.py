@@ -324,6 +324,38 @@ def _diagnose_prompt(lang: str, photo_position: str, shot_type: str) -> Tuple[st
         "- Gib AUSSCHLIESSLICH valides JSON zurück.\n"
         "- Verwende EXAKT das vorgegebene JSON-Schema.\n"
         "- Keine zusätzlichen Texte außerhalb des JSON.\n"
+        "KRITISCHE URSACHEN- UND HANDLUNGSREGELN (Zwingend):\n"
+"- Behandle NIEMALS nur Symptome, ohne zuerst die wahrscheinliche Ursache zu bewerten.\n"
+"- Wenn MEHR ALS EIN Nährstoffmangel gleichzeitig erkannt wird (z.B. Kalium + Magnesium),\n"
+"  darf KEINE direkte Düngeempfehlung ausgesprochen werden.\n\n"
+
+"- Wenn ein Nährstoffmangel UND ein Nährstoffüberschuss gleichzeitig möglich erscheinen,\n"
+"  MUSS ein pH-Problem oder Nährstoff-Lockout als wahrscheinliche Ursache priorisiert werden.\n\n"
+
+"- In folgenden Fällen gilt AUTOMATISCH:\n"
+"  → ist_unsicher = true\n"
+"  → hinweis_experte = true\n"
+"  → KEINE konkrete Dünger- oder Dosierungsempfehlung\n\n"
+
+"Diese Fälle sind:\n"
+"- Mehrfachmangel (zwei oder mehr Nährstoffe betroffen)\n"
+"- Mangel + Überschuss-Symptome gleichzeitig\n"
+"- Chaotische oder widersprüchliche Blattmuster\n"
+"- Verdacht auf pH-Problem oder Lockout\n\n"
+
+"- Bei Lockout-Verdacht sind die einzigen erlaubten Empfehlungen:\n"
+"  • Ursache prüfen (pH-Wert, Wurzelzone, Gießverhalten)\n"
+"  • Beobachten statt Eingreifen\n"
+"  • Weitere Fotos oder Messwerte anfordern\n\n"
+
+"- Direkte Düngemaßnahmen sind NUR erlaubt, wenn:\n"
+"  • exakt EIN klarer Mangel vorliegt\n"
+"  • keine Überschuss-Symptome sichtbar sind\n"
+"  • keine Hinweise auf Lockout bestehen\n"
+"  • die Bildqualität ausreichend ist\n\n"
+
+"- Diese Regeln haben VORRANG vor allen anderen Analyse- oder Empfehlungsschritten.\n"
+
     )
 
     user_prompt = (

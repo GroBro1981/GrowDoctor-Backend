@@ -355,6 +355,17 @@ def _diagnose_prompt(lang: str, photo_position: str, shot_type: str) -> Tuple[st
 "  • die Bildqualität ausreichend ist\n\n"
 
 "- Diese Regeln haben VORRANG vor allen anderen Analyse- oder Empfehlungsschritten.\n"
+"URSACHEN-PRIORITÄT & SICHERHEITSREGEL:\n"
+"- Wenn gleichzeitig mehrere unterschiedliche Nährstoffmängel oder\n"
+"  widersprüchliche Symptome erkannt werden (z. B. Mangel + Überschuss),\n"
+"  DARF KEINE konkrete Düngeempfehlung gegeben werden.\n"
+"- In diesem Fall ist als wahrscheinliche Ursache ein pH-Problem,\n"
+"  Nährstoff-Lockout, Wurzelstress oder Überdüngung zu priorisieren.\n"
+"- Solche Diagnosen sind als UNSICHER zu kennzeichnen.\n"
+"- Es MUSS ausdrücklich empfohlen werden, einen erfahrenen Grower\n"
+"  oder Fachbetrieb hinzuzuziehen, um weiteren Schaden zu vermeiden.\n"
+"- Ziel ist Schadensbegrenzung, nicht kurzfristige Symptombehandlung.\n"
+
 
     )
 

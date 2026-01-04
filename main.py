@@ -667,11 +667,12 @@ async def diagnose(
             "empfohlene_kontrolle_in_tagen": 3,
             "dringlichkeit": "mittel",
             "schweregrad": "mittel",
-            "bildqualitaet_score": 0,
-            "hinweis_bildqualitaet": "",
+            "bildqualitaet_score": qual.get("score", 80),
+            "hinweis_bildqualitaet": qual.get("hinweis", ""),
             "foto_empfehlungen": (qual.get("foto_tipps") or []),
-            # helpful flags for UI later
-            "ist_unsicher": ist_unsicher,
+# helpful flags for UI later
+            "ist_unsicher": False if w >= 75 else ist_unsicher,
+
         }
         return legacy
 

@@ -620,6 +620,65 @@ async def diagnose(
 
     result_json = _extract_json(content)
 
+        # ---- legacy output for Beta/Pro-UI compatibility ----
+    def _legacy_from_new_schema(r: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Convert new schema (analyse/unsicherheit/empfehlung/qualitaet/...) into
+        the older flat fields the Flutter UI expects.
+        """
+        analyse = r.get("analyse") or {}
+        qual = r.get("qualitaet") or {}
+        uns = r.get("unsicherheit") or {}
+        emp = r.get("empfehlung") or {}
+
+        ist_unsicher = bool(uns.get("ist_unsicher", False))
+        primary = uns.get("primary") or {}
+        secondary = uns.get("secondary") or {}
+
+        # Pick main problem
+        if ist_unsicher and primary.get("hauptproblem"):
+            hauptproblem = str(primary.get("hauptproblem"))
+            kategorie = str(primary.get("kategorie", analyse.get("kategorie", "unbekannt")))
+            wahrscheinlichkeit = primary.get("wahrscheinlichkeit", analyse.get("wahrscheinlichkeit", 0))
+        else:
+            hauptproblem = str(analyse.get("hauptproblem", "unbekannt"))
+            kategorie = str(analyse.get("kategorie", "unbekannt"))
+            wahrscheinlichkeit = analyse.get("wahrscheinlichkeit", 0)
+
+        # Ensure percentage-like number (0..100)
+        try:
+            w = float(wahrscheinlichkeit)
+        except Exception:
+            w = 0.0
+        if 0 < w <= 1:
+            w = w * 100.0
+
+        # Flatten to old keys
+        legacy = {
+            "hauptproblem": hauptproblem,
+            "kategorie": kategorie,
+            "wahrscheinlichkeit": int(round(w)),
+            "beschreibung": str(emp.get("kurz") or ""),
+            "stadium": "unbekannt",
+            "betroffene_teile": analyse.get("symptome") or [],
+            "sofort_massnahmen": emp.get("naechste_schritte") or [],
+            "vorbeugung": [],
+            "alternativen": [],
+            "empfohlene_kontrolle_in_tagen": 3,
+            "dringlichkeit": "mittel",
+            "schweregrad": "mittel",
+            "bildqualitaet_score": 0,
+            "hinweis_bildqualitaet": "",
+            "foto_empfehlungen": (qual.get("foto_tipps") or []),
+            # helpful flags for UI later
+            "ist_unsicher": ist_unsicher,
+        }
+        return legacy
+
+    legacy_result = _legacy_from_new_schema(result_json)
+    # -----------------------------------------------
+
+
             # --- GrowDoctor: Ursachenbasierte Sicherheitslogik ---
     details_text = str(result_json.get("details", "")).lower()
 
@@ -685,9 +744,9 @@ async def diagnose(
         "status": "ok",
         "already_analyzed": False,
         "image_hash": img_hash,
-        "result": result_json,
+        "result": legacy_result,
         "debug_photo_position": photo_position, 
-        "bebug_shot_type": shot_type,
+        "debug_shot_type": shot_type,
         "legal": {
             "disclaimer_title": t(lang, "disclaimer_title"),
             "disclaimer_body": t(lang, "disclaimer_body"),

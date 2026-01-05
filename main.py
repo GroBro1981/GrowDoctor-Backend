@@ -202,6 +202,11 @@ def _to_data_url(upload: UploadFile, data: bytes) -> str:
     b64 = base64.b64encode(data).decode("utf-8")
     return f"data:{mime};base64,{b64}"
 
+def _diagnose_prompt(lang: str, photo_position: str, shot_type: str):
+    # TEMP STUB: verhindert 500, bis wir den neuen Prompt-Block fertig haben
+    return "", ""
+
+
 
 def _extract_json(text: str) -> Dict[str, Any]:
     """

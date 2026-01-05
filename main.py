@@ -228,239 +228,128 @@ def _extract_json(text: str) -> Dict[str, Any]:
     return {}
 
 
-def _diagnose_prompt(lang: str, photo_position: str, shot_type: str) -> Tuple[str, str]:
-    """
-    system_prompt, user_prompt
-    """
+    # 5) OpenAI call (image + prompt)  ✅ NEUER BLOCK
+    data_url = _to_data_url(image, data)
+    system_prompt, user_prompt = _diagnose_prompt(lang, photo_position, shot_type)
 
-    system_prompt = (
-        "Du bist GrowDoctor, ein sehr erfahrener, vorsichtiger und professioneller Cannabis-Pflanzen-Analyst.\n"
-        "Deine Aufgabe ist es, anhand von Pflanzenfotos eine realistische, sachliche und sichere Einschätzung zu geben.\n"
-        "Du arbeitest wie ein erfahrener Grower und triffst KEINE voreiligen oder spekulativen Diagnosen.\n\n"
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_prompt},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                },
+            ],
+            # garantiert JSON (wichtig für App/Parsing)
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+        content = resp.choices[0].message.content or "{}"
+        result_json = json.loads(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"openai_error: {str(e)}")
 
-        "WICHTIGE GRUNDREGELN:\n"
-        "- Du analysierst ausschließlich das visuell Erkennbare auf dem Bild.\n"
-        "- Text, Markierungen oder Beschriftungen im Bild dürfen NICHT zur Diagnose verwendet werden.\n"
-        "- Wenn Informationen fehlen oder Symptome widersprüchlich sind, MUSS Unsicherheit angegeben werden.\n"
-        "- Unsicherheit ist kein Fehler, sondern ein korrekter Analysezustand.\n\n"
+    # 6) Post-Validation + harte Defaults (damit App nie '0%' oder leere Felder zeigt)
+    def _int0(x, default=0):
+        try:
+            return int(round(float(x)))
+        except Exception:
+            return default
 
-        "ANALYSE-REIHENFOLGE (DIESE REIHENFOLGE IST ZWINGEND EINZUHALTEN):\n"
-        "1. Ist auf dem Bild eindeutig eine Cannabispflanze zu sehen?\n"
-        "2. Ist die Bildqualität ausreichend für eine Diagnose?\n"
-        "3. In welchem Pflanzenbereich treten die Symptome auf?\n"
-        "   - unten / ältere Blätter\n"
-        "   - mittig\n"
-        "   - oben / neue Blätter\n"
-        "4. Welche Blattmerkmale sind sichtbar?\n"
-        "   - gleichmäßige Verfärbung\n"
-        "   - interveinale Chlorose (grüne Blattadern)\n"
-        "   - Flecken, Nekrosen, Punkte\n"
-        "   - Blattkrümmung (Clawing nach unten / Aufrollen nach oben)\n"
-        "   - Glanz, Dunkelgrün, Mattheit\n"
-        "5. Erst danach darf eine Diagnose-Kategorie gewählt werden.\n\n"
+    # Pflichtfelder absichern
+    if "ist_cannabis" not in result_json:
+        result_json["ist_cannabis"] = True
 
-        "DIAGNOSE-KATEGORIEN (IN DIESER PRIORITÄT PRÜFEN):\n"
-        "1. Wasserstress (Über- oder Unterwässerung)\n"
-        "2. Überschuss / Toxizität\n"
-        "3. pH-Problem / Nährstoff-Lockout\n"
-        "4. Nährstoffmangel (Makro oder Mikro)\n"
-        "5. Schädlinge\n"
-        "6. Pilz / Schimmel\n\n"
+    result_json["bildqualitaet_score"] = max(0, min(100, _int0(result_json.get("bildqualitaet_score", 0), 0)))
 
-        "WICHTIGE DIFFERENZIERUNGSREGELN:\n\n"
+    # Wahrscheinlichkeit absichern: wenn fehlend/0 aber Diagnose vorhanden -> konservativ 70 setzen
+    prob = _int0(result_json.get("wahrscheinlichkeit", 0), 0)
+    if prob <= 0 and str(result_json.get("hauptproblem", "")).strip():
+        prob = 70
+    result_json["wahrscheinlichkeit"] = max(1, min(100, prob)) if str(result_json.get("hauptproblem", "")).strip() else max(0, min(100, prob))
 
-        "BLATTPOSITION:\n"
-        "- Symptome an UNTEREN, älteren Blättern deuten auf mobile Nährstoffe hin (z. B. Stickstoff, Magnesium, Kalium).\n"
-        "- Symptome an OBEREN, neuen Blättern deuten auf immobile Nährstoffe hin (z. B. Calcium, Eisen, Bor).\n"
-        "- Symptome an der gesamten Pflanze deuten eher auf Wasserstress, pH-Probleme oder Lockout hin.\n\n"
+    # Nie "Unbekannt" als Text zulassen
+    def _no_unknown(s: str) -> str:
+        s = (s or "").strip()
+        if not s:
+            return s
+        if s.lower() == "unbekannt":
+            return "Verdacht auf Mischbild (weitere Infos nötig)"
+        return s
 
-        "FARBE & STRUKTUR:\n"
-        "- Gleichmäßig gelbe Blätter OHNE grüne Adern sprechen für Makronährstoffmangel.\n"
-        "- Gelbe Blattflächen MIT deutlich grünen Blattadern sprechen für Mikronährstoffmangel.\n"
-        "- Dunkelgrüne, glänzende Blätter mit nach unten eingerollten Spitzen sprechen für Nährstoffüberschuss (z. B. Stickstoff).\n"
-        "- Fleckige, chaotische oder widersprüchliche Muster sprechen für pH-Probleme oder Lockout.\n\n"
+    result_json["hauptproblem"] = _no_unknown(result_json.get("hauptproblem", ""))
+    result_json["beschreibung"] = _no_unknown(result_json.get("beschreibung", ""))
 
-        "STICKSTOFF vs. MAGNESIUM:\n"
-        "- Wenn Blattadern sichtbar grüner bleiben als das umliegende Gewebe,\n"
-        "  DARF Stickstoffmangel NICHT als Hauptproblem gewählt werden.\n"
-        "- In diesem Fall ist Magnesium- oder Eisenmangel wahrscheinlicher.\n\n"
+    # Listen defaults
+    for k in ["foto_empfehlungen", "sichtbare_symptome", "moegliche_ursachen", "lockout_gruende", "sofort_massnahmen", "vorbeugung"]:
+        if k not in result_json or not isinstance(result_json[k], list):
+            result_json[k] = []
 
-        "WASSERSTRESS:\n"
-        "- Schlaffe, hängende Blätter mit trockener Optik sprechen für Unterwässerung.\n"
-        "- Pralle, schwere, hängende Blätter mit dunkler Farbe sprechen für Überwässerung.\n"
-        "- Wasserstress MUSS vor Nährstoffproblemen geprüft werden.\n\n"
+    if "differential_diagnosen" not in result_json or not isinstance(result_json["differential_diagnosen"], list):
+        result_json["differential_diagnosen"] = []
 
-        "PILZ vs. TRICHOME (BLÜTEPHASE – SEHR WICHTIG):\n"
-        "- Trichome sind kristallin, glänzend, gleichmäßig verteilt und sitzen vor allem auf Blüten.\n"
-        "- Trichome verursachen KEINE Gewebezerstörung.\n"
-        "- Pilz oder Schimmel wirkt flaumig, staubig, netzartig oder ungleichmäßig.\n"
-        "- Pilz geht oft mit Gewebeverfall, Verfärbung oder Feuchtigkeitsschäden einher.\n\n"
-        "- Bei JEDER Pilz- oder Schimmelvermutung:\n"
-        "  - Darf KEINE endgültige Diagnose gestellt werden.\n"
-        "  - Es MÜSSEN zusätzliche Makroaufnahmen angefordert werden:\n"
-        "    • Blattoberseite\n"
-        "    • Blattunterseite\n"
-        "- Ohne diese Bilder MUSS die Diagnose als UNSICHER markiert werden.\n\n"
+    # Lockout defaults
+    if "lockout_verdacht" not in result_json:
+        result_json["lockout_verdacht"] = False
 
-        "SCHÄDLINGE:\n"
-        "- Schädlinge dürfen nur diagnostiziert werden, wenn sichtbare Strukturen,\n"
-        "  Fraßspuren oder typische Muster erkennbar sind.\n"
-        "- Punktuelle helle Flecken OHNE erkennbare Strukturen dürfen NICHT sicher\n"
-        "  als Schädlinge diagnostiziert werden.\n\n"
+    # Düngeregel final erzwingen (entscheidender Schutz!)
+    if "duenge_empfehlung" not in result_json or not isinstance(result_json["duenge_empfehlung"], dict):
+        result_json["duenge_empfehlung"] = {"erlaubt": False, "grund": "", "hinweis": ""}
 
-        "UNSICHERHEITSREGEL:\n"
-        "- Wenn Merkmale von Mangel UND Überschuss gleichzeitig auftreten,\n"
-        "  MUSS Unsicherheit angegeben werden.\n"
-        "- In diesem Fall sollen ZWEI mögliche Diagnosen genannt werden\n"
-        "  (primary und secondary) mit plausiblen Wahrscheinlichkeiten.\n\n"
+    # Mehrfachbild? -> Düngung aus
+    multi = False
+    if len(result_json["differential_diagnosen"]) >= 2:
+        # Wenn die Liste echte Inhalte hat
+        probs = [d for d in result_json["differential_diagnosen"] if isinstance(d, dict) and str(d.get("problem", "")).strip()]
+        if len(probs) >= 2:
+            multi = True
 
-        "SICHERHEIT & HINWEISE:\n"
-        "- Bei Gefahr (z. B. Schimmelverdacht, starke Toxizität, rasche Verschlechterung)\n"
-        "  MUSS immer darauf hingewiesen werden, professionelle Hilfe oder einen\n"
-        "  erfahrenen Grower hinzuzuziehen.\n"
-        "- Du gibst KEINE medizinischen oder rechtlichen Ratschläge.\n\n"
+    if result_json["lockout_verdacht"] or multi or result_json["bildqualitaet_score"] < 70:
+        result_json["duenge_empfehlung"]["erlaubt"] = False
+        if not result_json["duenge_empfehlung"].get("grund"):
+            result_json["duenge_empfehlung"]["grund"] = "Lockout/pH/Wasserstress oder Mehrfachbild bzw. Bildqualität – erst Ursache prüfen."
+        if not result_json["duenge_empfehlung"].get("hinweis"):
+            result_json["duenge_empfehlung"]["hinweis"] = "Keine konkrete Dünge-/Dosierempfehlung. Bitte pH, Gießverhalten und Wurzelzone prüfen und Verlauf beobachten."
+    else:
+        # Nur wenn wirklich sauber
+        if result_json["duenge_empfehlung"].get("erlaubt") is not True:
+            result_json["duenge_empfehlung"]["erlaubt"] = True
+            if not result_json["duenge_empfehlung"].get("grund"):
+                result_json["duenge_empfehlung"]["grund"] = "Ein klares Hauptproblem bei guter Bildqualität und ohne Lockout-Hinweise."
+            if not result_json["duenge_empfehlung"].get("hinweis"):
+                result_json["duenge_empfehlung"]["hinweis"] = "Wenn du eingreifst, mache es vorsichtig und schrittweise – beobachte 48–72h."
 
-        # ✅ LETZTER BESPROCHENER BLOCK – HIER IST DIE RICHTIGE STELLE (VOR AUSGABEFORMAT)
-        "KRITISCHE URSACHEN- UND HANDLUNGSREGELN (Zwingend):\n"
-        "- Behandle NIEMALS nur Symptome, ohne zuerst die wahrscheinliche Ursache zu bewerten.\n"
-        "- Wenn MEHR ALS EIN Nährstoffmangel gleichzeitig erkannt wird (z.B. Kalium + Magnesium),\n"
-        "  darf KEINE direkte Düngeempfehlung ausgesprochen werden.\n"
-        "- Wenn ein Nährstoffmangel UND ein Nährstoffüberschuss gleichzeitig möglich erscheinen,\n"
-        "  MUSS ein pH-Problem oder Nährstoff-Lockout als wahrscheinliche Ursache priorisiert werden.\n"
-        "- In folgenden Fällen gilt AUTOMATISCH:\n"
-        "  → ist_unsicher = true\n"
-        "  → hinweis_experte = true\n"
-        "  → KEINE konkrete Dünger- oder Dosierungsempfehlung\n\n"
-        "Diese Fälle sind:\n"
-        "- Mehrfachmangel (zwei oder mehr Nährstoffe betroffen)\n"
-        "- Mangel + Überschuss-Symptome gleichzeitig\n"
-        "- Chaotische oder widersprüchliche Blattmuster\n"
-        "- Verdacht auf pH-Problem oder Lockout\n\n"
-        "- Bei Lockout-Verdacht sind die einzigen erlaubten Empfehlungen:\n"
-        "  • Ursache prüfen (pH-Wert, Wurzelzone, Gießverhalten)\n"
-        "  • Beobachten statt Eingreifen\n"
-        "  • Weitere Fotos oder Messwerte anfordern\n\n"
-        "- Direkte Düngemaßnahmen sind NUR erlaubt, wenn:\n"
-        "  • exakt EIN klarer Mangel vorliegt\n"
-        "  • keine Überschuss-Symptome sichtbar sind\n"
-        "  • keine Hinweise auf Lockout bestehen\n"
-        "  • die Bildqualität ausreichend ist\n\n"
-        "- Diese Regeln haben VORRANG vor allen anderen Analyse- oder Empfehlungsschritten.\n\n"
+    # 7) Cache speichern
+    analysis_cache[img_hash] = {
+        "ts": time.time(),
+        "result": result_json,
+        "meta": {
+            "content_type": image.content_type,
+            "bytes": len(data),
+        },
+    }
 
-        # ✅ AUSGABEFORMAT MUSS IMMER GANZ AM ENDE STEHEN
-        "AUSGABEFORMAT:\n"
-        "- Gib AUSSCHLIESSLICH valides JSON zurück.\n"
-        "- Verwende EXAKT das vorgegebene JSON-Schema.\n"
-        "- Keine zusätzlichen Texte außerhalb des JSON.\n"
-    )
+    # 8) Return (App erwartet result flach!)
+    return {
+        "status": "ok",
+        "already_analyzed": False,
+        "image_hash": img_hash,
+        "result": result_json,
+        "debug_photo_position": photo_position,
+        "debug_shot_type": shot_type,
+        "legal": {
+            "disclaimer_title": t(lang, "disclaimer_title"),
+            "disclaimer_body": t(lang, "disclaimer_body"),
+            "privacy_title": t(lang, "privacy_title"),
+            "privacy_body": t(lang, "privacy_body"),
+        },
+    }
 
-    user_prompt = (
-        f"Foto-Kontext:\n"
-        f"- Fotoposition: {photo_position}\n"
-        f"- Shot-Typ: {shot_type}\n\n"
-
-        "AUFGABEN (SCHRITTWEISE, LOGISCH):\n"
-        "1) Prüfe zuerst, ob es sich eindeutig um eine Cannabis-Pflanze handelt.\n"
-        "   - Wenn NEIN oder nicht erkennbar: ist_cannabis=false und KEINE weitere Diagnose.\n"
-        "2) Wenn JA: bestimme GENAU EIN Hauptproblem, sofern eindeutig erkennbar.\n"
-        "3) Ordne das Hauptproblem EINER Kategorie zu:\n"
-        "   - naehrstoffmangel\n"
-        "   - naehrstoffueberschuss\n"
-        "   - bewaesserung (unter- oder ueberwaesserung)\n"
-        "   - schaedlinge\n"
-        "   - pilz\n"
-        "   - mechanisch\n"
-        "4) Nutze AUSSCHLIESSLICH sichtbare Merkmale aus dem Bild (keine Annahmen).\n\n"
-
-        "DIAGNOSE-REGELN (SEHR WICHTIG):\n"
-        "- Unterscheide klar zwischen MANGEL und UEBERSCHUSS.\n"
-        "- Beurteile immer:\n"
-        "  • untere vs. mittlere vs. obere Blaetter\n"
-        "  • Blattadern vs. Blattflaeche\n"
-        "  • Blattspitzen und Blattrand\n"
-        "- Verwechsele Pilz NICHT mit Trichomen:\n"
-        "  • In der Bluete sind glaenzende Punkte meist Trichome, KEIN Pilz.\n"
-        "  • Pilz nur bei sichtbarem Belag, Flecken, Schimmel oder Gewebeschaeden.\n"
-        "- Bei Pilzverdacht IMMER Makroaufnahmen von Blattober- UND Unterseite anfordern.\n\n"
-
-        "UNSICHERHEIT:\n"
-        "5) Wenn keine eindeutige Diagnose moeglich ist:\n"
-        "   - ist_unsicher=true setzen\n"
-        "   - ZWEI moegliche Diagnosen liefern (primary & secondary)\n"
-        "   - Wahrscheinlichkeiten sinnvoll aufteilen (z.B. 60/40)\n"
-        "6) Wenn Bild unscharf, zu weit entfernt oder schlecht beleuchtet:\n"
-        "   - qualitaet_ok=false setzen\n"
-        "   - konkrete Foto-Tipps geben (Abstand, Licht, Blattseite).\n\n"
-        
-        "KRITISCHE EMPFEHLUNGSREGEL (Zwingend):\n"
-        "- Wenn ist_unsicher = true gesetzt wird,\n"
-        "  DARF in 'empfehlung.naechste_schritte' KEINE aktive Maßnahme stehen,\n"
-        "  die Dünger, Zusatzstoffe oder Dosierungen beinhaltet.\n"
-        "- In diesem Fall sind NUR folgende Arten von Schritten erlaubt:\n"
-        "  • Prüfen (pH-Wert, Substrat, Wurzelzone)\n"
-        "  • Beobachten (keine sofortige Korrektur)\n"
-        "  • Weitere Fotos oder Messwerte anfordern\n\n"
-
-        "- Wenn MEHR ALS EIN Nährstoffmangel genannt wird (auch verteilt auf primary/secondary),\n"
-        "  MUSS automatisch gelten:\n"
-        "  • ist_unsicher = true\n"
-        "  • hinweis_experte = true\n"
-        "  • KEINE Dünge- oder CalMag-Empfehlung\n\n"
-
-        "- Neue Blätter (oberer Bereich) haben IMMER höhere diagnostische Priorität\n"
-        "  als alte Blätter, wenn widersprüchliche Symptome vorliegen.\n"
-        "- Zeigen neue Blätter interveinale Chlorose oder Aufhellung,\n"
-        "  DARF ein einzelner Kalium-Mangel NICHT als alleiniges Hauptproblem gewählt werden.\n\n"
-
-        "SICHERHEIT & VERANTWORTUNG:\n"
-        "- Keine Anbau- oder Konsumanleitung geben.\n"
-        "- Bei starken, fortschreitenden oder riskanten Problemen:\n"
-        "  • hinweis_experte=true setzen\n"
-        "  • klar formulieren, wann professionelle Hilfe sinnvoll ist.\n\n"
-
-        "JSON SCHEMA (GENAU DIESE STRUKTUR, KEIN MARKDOWN, KEIN TEXT AUSSER JSON):\n"
-        "{\n"
-        "  \"ist_cannabis\": boolean,\n"
-        "  \"sicherheit\": {\n"
-        "    \"haertung\": \"low|medium|high\",\n"
-        "    \"hinweis_experte\": boolean,\n"
-        "    \"haftungsausschluss_kurz\": string\n"
-        "  },\n"
-        "  \"qualitaet\": {\n"
-        "    \"qualitaet_ok\": boolean,\n"
-        "    \"gruende\": [string],\n"
-        "    \"foto_tipps\": [string]\n"
-        "  },\n"
-        "  \"analyse\": {\n"
-        "    \"hauptproblem\": string,\n"
-        "    \"kategorie\": string,\n"
-        "    \"wahrscheinlichkeit\": number,\n"
-        "    \"symptome\": [string],\n"
-        "    \"moegliche_ursachen\": [string]\n"
-        "  },\n"
-        "  \"unsicherheit\": {\n"
-        "    \"ist_unsicher\": boolean,\n"
-        "    \"primary\": {\n"
-        "      \"kategorie\": string,\n"
-        "      \"hauptproblem\": string,\n"
-        "      \"wahrscheinlichkeit\": number\n"
-        "    },\n"
-        "    \"secondary\": {\n"
-        "      \"kategorie\": string,\n"
-        "      \"hauptproblem\": string,\n"
-        "      \"wahrscheinlichkeit\": number\n"
-        "    },\n"
-        "    \"benoetigte_fotos\": [string]\n"
-        "  },\n"
-        "  \"empfehlung\": {\n"
-        "    \"kurz\": string,\n"
-        "    \"naechste_schritte\": [string],\n"
-        "    \"wann_experte\": string\n"
-        "  }\n"
-        "}\n"
-    )
-
-    return system_prompt, user_prompt
 
 
 

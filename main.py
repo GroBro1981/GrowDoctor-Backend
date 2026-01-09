@@ -6,6 +6,7 @@ import json
 import time
 import base64
 import os
+import re
 
 from openai import OpenAI
 
@@ -119,7 +120,9 @@ def build_prompt(lang: str, photo_position: str, shot_type: str):
 @app.post("/diagnose")
 async def diagnose(
     image: UploadFile = File(...),
-    lang: str = Form(DEFAULT_LANG),
+    lang: Optional[str] = Form(None),
+    language: Optional[str] = Form(None),
+    locale: Optional[str] = Form(None),
     age_confirmed: bool = Form(False),
     photo_position: str = Form("unknown"),
     shot_type: str = Form("unknown"),
@@ -129,30 +132,34 @@ async def diagnose(
     if not age_confirmed:
         raise HTTPException(status_code=400, detail="Age not confirmed")
 
+    lang_final = normalize_lang(lang or language or locale)
+
     data = await image.read()
     img_hash = sha256_bytes(data)
+    cache_key = f"{img_hash}:{lang_final}"
 
     # ---------- CACHE ----------
-    cached = analysis_cache.get(img_hash)
+    cached = analysis_cache.get(cache_key)
     if cached and not force:
         return {
             "status": "ok",
             "already_analyzed": True,
             "image_hash": img_hash,
             "result": cached["result"],
+            "debug_lang": lang_final,
             "debug_photo_position": photo_position,
             "debug_shot_type": shot_type,
             "legal": {
-                "disclaimer_title": t(lang, "disclaimer_title"),
-                "disclaimer_body": t(lang, "disclaimer_body"),
-                "privacy_title": t(lang, "privacy_title"),
-                "privacy_body": t(lang, "privacy_body"),
+                "disclaimer_title": t(lang_final, "disclaimer_title"),
+                "disclaimer_body": t(lang_final, "disclaimer_body"),
+                "privacy_title": t(lang_final, "privacy_title"),
+                "privacy_body": t(lang_final, "privacy_body"),
             },
         }
 
     # ---------- OPENAI ----------
     data_url = to_data_url(image, data)
-    system_prompt, user_prompt = build_prompt(lang, photo_position, shot_type)
+    system_prompt, user_prompt = build_prompt(lang_final, photo_position, shot_type)
 
     try:
         resp = client.chat.completions.create(
@@ -187,7 +194,7 @@ async def diagnose(
     result["ist_unsicher"] = bool(result.get("ist_unsicher", False))
 
     # ---------- CACHE STORE ----------
-    analysis_cache[img_hash] = {
+    analysis_cache[cache_key] = {
         "ts": time.time(),
         "result": result,
     }
@@ -198,12 +205,13 @@ async def diagnose(
         "already_analyzed": False,
         "image_hash": img_hash,
         "result": result,
+        "debug_lang": lang_final,
         "debug_photo_position": photo_position,
         "debug_shot_type": shot_type,
         "legal": {
-            "disclaimer_title": t(lang, "disclaimer_title"),
-            "disclaimer_body": t(lang, "disclaimer_body"),
-            "privacy_title": t(lang, "privacy_title"),
-            "privacy_body": t(lang, "privacy_body"),
+            "disclaimer_title": t(lang_final, "disclaimer_title"),
+            "disclaimer_body": t(lang_final, "disclaimer_body"),
+            "privacy_title": t(lang_final, "privacy_title"),
+            "privacy_body": t(lang_final, "privacy_body"),
         },
     }

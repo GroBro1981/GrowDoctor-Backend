@@ -202,111 +202,9 @@ def _to_data_url(upload: UploadFile, data: bytes) -> str:
     b64 = base64.b64encode(data).decode("utf-8")
     return f"data:{mime};base64,{b64}"
 
-def _diagnose_prompt(lang: str, photo_position: str, shot_type: str) -> Tuple[str, str]:
-    """Returns (system_prompt, user_prompt) for the Beta diagnosis."""
-    lang = (lang or DEFAULT_LANG).lower().strip()
-    if lang not in I18N:
-        lang = DEFAULT_LANG
-
-    system_prompt = f"""Du bist GrowDoctor Beta, ein konservativer Diagnose-Assistent für Cannabis-Pflanzen anhand eines Fotos.
-
-GRUNDREGELN
-1) Ursache vor Symptom. Symptome sind Hinweise, keine Diagnose.
-2) Immer genau EINE Hauptursache nennen (auch wenn nur wahrscheinlich). Keine 'Unbekannt'.
-3) Reifegrad/Trichome/Erntezeitpunkt sind NICHT Teil der Beta (nicht erwähnen).
-4) Düngeempfehlungen sind selten. Bei Lockout/pH/Wasser/Wurzel/Umweltstress: KEINE Düngeempfehlung.
-5) Ampelsystem:
-   - gruen: geringes Risiko, einfache Maßnahmen
-   - gelb: moderates Risiko, konservative Maßnahmen & Beobachtung
-   - rot: hohes Risiko / starker Schaden / hoher Verlust -> IMMER Profi-Empfehlung zusätzlich
-6) Bildqualität: Wenn das Foto nicht ausreicht, trotzdem eine Hauptursache (wahrscheinlichste) nennen,
-   aber klar markieren, dass bessere Fotos nötig sind und welche genau.
-
-BILDQUALITÄT (wenn bessere Bilder nötig sind)
-- unscharf, zu dunkel/hell, Symptome nicht sichtbar, falscher Ausschnitt, Filter/Bearbeitung, zu weit weg, mehrere Pflanzen ohne Fokus.
-Fordere konkrete Bildarten an:
-- ganze Pflanze (frontal/seitlich), Nahaufnahme betroffene Stelle, Blattoberseite, Blattunterseite,
-  mehrere betroffene Blätter, Stamm/Knoten, Substratoberfläche, Drainage/Topfrand; ggf. Wurzel (nur falls möglich).
-
-STADIEN-Prioritäten (nur intern):
-- Keimling/Sämling: Wasser/O2/pH/Substrat/Licht/Temp > Dünger
-- Vegi: Wasser/pH/Lockout > Über/Unterdüngung > Licht/Hitze > Schädlinge/Pilze/Stress
-- Blüte früh/mittel: pH/Lockout > Überdüngung > Wasser > CalMag > Klima > Pilz/Schädlinge
-- Späte Blüte: Pilz/Blüte (Schimmel) > pH/Lockout > Überdüngung > Wasser > Salz > Alterung
-
-AUSGABEFORMAT
-Gib ausschließlich ein einziges JSON-Objekt zurück (keine Markdown-Zäune, kein Text außerhalb des JSON).
-Top-Level Keys müssen sein: "analyse", "qualitaet", "empfehlung", "unsicherheit".
-
-Sprache:
-- Alle frei formulierten Texte in Sprache: {lang}.
-- Kategorien/Enums dürfen Deutsch bleiben.
-""".strip()
-
-    user_prompt = f"""Analysiere das Foto.
-Metadaten:
-- photo_position: {photo_position}  (top/middle/bottom/underside/unknown)
-- shot_type: {shot_type} (whole_plant/closeup/unknown)
-
-Gib dieses JSON zurück:
-
-{{
-  "analyse": {{
-    "ist_cannabis": true,
-    "stadium": "keimling" | "vegi" | "bluete_frueh_mittel" | "bluete_spaet" | "unbekannt",
-    "hauptproblem": "<immer ausfüllen>",
-    "kategorie": "ueberduengung" | "unterduengung" | "lockout" | "ph_problem" | "ueberwaesserung" | "unterwaesserung" | "wurzelzone" | "umweltstress" | "schaedlinge" | "pilz" | "mangel" | "ueberschuss" | "alterung" | "mechanisch" | "genetik" | "mehrfaktoriell",
-    "wahrscheinlichkeit": 0-100,
-    "sichtbare_symptome": ["..."],
-    "moegliche_ursachen": ["..."],
-    "lockout_verdacht": true | false,
-    "lockout_gruende": ["..."],
-    "ampel": "gruen" | "gelb" | "rot"
-  }},
-  "qualitaet": {{
-    "score": 0-100,
-    "hinweis": "...",
-    "need_more_photos": true | false,
-    "foto_tipps": ["..."]
-  }},
-  "empfehlung": {{
-    "kurz": "<1-2 Sätze>",
-    "begruendung": "<kurz und klar>",
-    "naechste_schritte": ["..."],
-    "duenge_empfehlung": {{
-      "erlaubt": true | false,
-      "grund": "...",
-      "hinweis": "..."
-    }},
-    "profi": {{
-      "empfohlen": true | false,
-      "grund": "..."
-    }}
-  }},
-  "unsicherheit": {{
-    "ist_unsicher": true | false,
-    "warum": ["..."],
-    "primary": {{
-      "hauptproblem": "",
-      "kategorie": "",
-      "wahrscheinlichkeit": 0-100
-    }},
-    "secondary": [
-      {{"problem": "", "kategorie": "", "wahrscheinlichkeit": 0-100}}
-    ]
-  }}
-}}
-
-Wichtig:
-- analyse.hauptproblem darf niemals leer sein und nicht "Unbekannt".
-- Wenn unsicher: unsicherheit.ist_unsicher=true und fülle warum + mindestens 1 Alternative in secondary.
-- Düngeempfehlung: Bei Lockout/pH/Wasser/Wurzel/Umweltstress -> erlaubt=false.
-- Wenn ampel=rot -> profi.empfohlen=true (immer).
-""".strip()
-
-    return system_prompt, user_prompt
-
-
+def _diagnose_prompt(lang: str, photo_position: str, shot_type: str):
+    # TEMP STUB: verhindert 500, bis wir den neuen Prompt-Block fertig haben
+    return "", ""
 
 
 
@@ -333,6 +231,130 @@ def _extract_json(text: str) -> Dict[str, Any]:
         except Exception:
             return {}
     return {}
+
+
+    # 5) OpenAI call (image + prompt)  ✅ NEUER BLOCK
+    data_url = _to_data_url(image, data)
+    system_prompt, user_prompt = _diagnose_prompt(lang, photo_position, shot_type)
+
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_prompt},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                },
+            ],
+            # garantiert JSON (wichtig für App/Parsing)
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+        content = resp.choices[0].message.content or "{}"
+        result_json = json.loads(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"openai_error: {str(e)}")
+
+    # 6) Post-Validation + harte Defaults (damit App nie '0%' oder leere Felder zeigt)
+    def _int0(x, default=0):
+        try:
+            return int(round(float(x)))
+        except Exception:
+            return default
+
+    # Pflichtfelder absichern
+    if "ist_cannabis" not in result_json:
+        result_json["ist_cannabis"] = True
+
+    result_json["bildqualitaet_score"] = max(0, min(100, _int0(result_json.get("bildqualitaet_score", 0), 0)))
+
+    # Wahrscheinlichkeit absichern: wenn fehlend/0 aber Diagnose vorhanden -> konservativ 70 setzen
+    prob = _int0(result_json.get("wahrscheinlichkeit", 0), 0)
+    if prob <= 0 and str(result_json.get("hauptproblem", "")).strip():
+        prob = 70
+    result_json["wahrscheinlichkeit"] = max(1, min(100, prob)) if str(result_json.get("hauptproblem", "")).strip() else max(0, min(100, prob))
+
+    # Nie "Unbekannt" als Text zulassen
+    def _no_unknown(s: str) -> str:
+        s = (s or "").strip()
+        if not s:
+            return s
+        if s.lower() == "unbekannt":
+            return "Verdacht auf Mischbild (weitere Infos nötig)"
+        return s
+
+    result_json["hauptproblem"] = _no_unknown(result_json.get("hauptproblem", ""))
+    result_json["beschreibung"] = _no_unknown(result_json.get("beschreibung", ""))
+
+    # Listen defaults
+    for k in ["foto_empfehlungen", "sichtbare_symptome", "moegliche_ursachen", "lockout_gruende", "sofort_massnahmen", "vorbeugung"]:
+        if k not in result_json or not isinstance(result_json[k], list):
+            result_json[k] = []
+
+    if "differential_diagnosen" not in result_json or not isinstance(result_json["differential_diagnosen"], list):
+        result_json["differential_diagnosen"] = []
+
+    # Lockout defaults
+    if "lockout_verdacht" not in result_json:
+        result_json["lockout_verdacht"] = False
+
+    # Düngeregel final erzwingen (entscheidender Schutz!)
+    if "duenge_empfehlung" not in result_json or not isinstance(result_json["duenge_empfehlung"], dict):
+        result_json["duenge_empfehlung"] = {"erlaubt": False, "grund": "", "hinweis": ""}
+
+    # Mehrfachbild? -> Düngung aus
+    multi = False
+    if len(result_json["differential_diagnosen"]) >= 2:
+        # Wenn die Liste echte Inhalte hat
+        probs = [d for d in result_json["differential_diagnosen"] if isinstance(d, dict) and str(d.get("problem", "")).strip()]
+        if len(probs) >= 2:
+            multi = True
+
+    if result_json["lockout_verdacht"] or multi or result_json["bildqualitaet_score"] < 70:
+        result_json["duenge_empfehlung"]["erlaubt"] = False
+        if not result_json["duenge_empfehlung"].get("grund"):
+            result_json["duenge_empfehlung"]["grund"] = "Lockout/pH/Wasserstress oder Mehrfachbild bzw. Bildqualität – erst Ursache prüfen."
+        if not result_json["duenge_empfehlung"].get("hinweis"):
+            result_json["duenge_empfehlung"]["hinweis"] = "Keine konkrete Dünge-/Dosierempfehlung. Bitte pH, Gießverhalten und Wurzelzone prüfen und Verlauf beobachten."
+    else:
+        # Nur wenn wirklich sauber
+        if result_json["duenge_empfehlung"].get("erlaubt") is not True:
+            result_json["duenge_empfehlung"]["erlaubt"] = True
+            if not result_json["duenge_empfehlung"].get("grund"):
+                result_json["duenge_empfehlung"]["grund"] = "Ein klares Hauptproblem bei guter Bildqualität und ohne Lockout-Hinweise."
+            if not result_json["duenge_empfehlung"].get("hinweis"):
+                result_json["duenge_empfehlung"]["hinweis"] = "Wenn du eingreifst, mache es vorsichtig und schrittweise – beobachte 48–72h."
+
+    # 7) Cache speichern
+    analysis_cache[img_hash] = {
+        "ts": time.time(),
+        "result": result_json,
+        "meta": {
+            "content_type": image.content_type,
+            "bytes": len(data),
+        },
+    }
+
+    # 8) Return (App erwartet result flach!)
+    return {
+        "status": "ok",
+        "already_analyzed": False,
+        "image_hash": img_hash,
+        "result": result_json,
+        "debug_photo_position": photo_position,
+        "debug_shot_type": shot_type,
+        "legal": {
+            "disclaimer_title": t(lang, "disclaimer_title"),
+            "disclaimer_body": t(lang, "disclaimer_body"),
+            "privacy_title": t(lang, "privacy_title"),
+            "privacy_body": t(lang, "privacy_body"),
+        },
+    }
+
 
 
 
@@ -484,7 +506,6 @@ async def diagnose(
                     ],
                 },
             ],
-            response_format={"type": "json_object"},
             temperature=0.2,
         )
         content = resp.choices[0].message.content or ""
@@ -492,134 +513,6 @@ async def diagnose(
         raise HTTPException(status_code=500, detail=f"openai_error: {str(e)}")
 
     result_json = _extract_json(content)
-
-
-    # ---- Beta enforcement: Ampel / Profi / Dünge-Regeln (server-side, deterministisch) ----
-    def _lower_join(x):
-        if isinstance(x, list):
-            return " ".join(str(i) for i in x).lower()
-        return str(x or "").lower()
-
-    analyse = (result_json.get("analyse") or {})
-    qual = (result_json.get("qualitaet") or {})
-    emp = (result_json.get("empfehlung") or {})
-    uns = (result_json.get("unsicherheit") or {})
-
-    if not isinstance(analyse, dict):
-        analyse = {}
-    if not isinstance(qual, dict):
-        qual = {}
-    if not isinstance(emp, dict):
-        emp = {}
-    if not isinstance(uns, dict):
-        uns = {}
-
-    analyse.setdefault("ist_cannabis", True)
-    analyse.setdefault("stadium", "unbekannt")
-    analyse.setdefault("hauptproblem", "Wahrscheinlich Wasser-/Wurzelzonenstress (mehr Infos nötig)")
-    analyse.setdefault("kategorie", "mehrfaktoriell")
-    analyse.setdefault("wahrscheinlichkeit", 60)
-    analyse.setdefault("sichtbare_symptome", [])
-    analyse.setdefault("moegliche_ursachen", [])
-    analyse.setdefault("lockout_verdacht", False)
-    analyse.setdefault("lockout_gruende", [])
-    analyse.setdefault("ampel", "gelb")
-
-    qual.setdefault("score", 70)
-    qual.setdefault("hinweis", "")
-    qual.setdefault("need_more_photos", False)
-    qual.setdefault("foto_tipps", [])
-
-    emp.setdefault("kurz", "")
-    emp.setdefault("begruendung", "")
-    emp.setdefault("naechste_schritte", [])
-    if not isinstance(emp.get("duenge_empfehlung"), dict):
-        emp["duenge_empfehlung"] = {"erlaubt": False, "grund": "", "hinweis": ""}
-    if not isinstance(emp.get("profi"), dict):
-        emp["profi"] = {"empfohlen": False, "grund": ""}
-
-    # Normalize probability 1..100
-    try:
-        p = float(analyse.get("wahrscheinlichkeit", 0))
-    except Exception:
-        p = 0.0
-    if 0 < p <= 1:
-        p = p * 100.0
-    analyse["wahrscheinlichkeit"] = max(1, min(100, int(round(p))))
-
-    text_blob = " ".join([
-        _lower_join(analyse.get("hauptproblem")),
-        _lower_join(analyse.get("kategorie")),
-        _lower_join(analyse.get("sichtbare_symptome")),
-        _lower_join(analyse.get("moegliche_ursachen")),
-        _lower_join(emp.get("begruendung")),
-        _lower_join(emp.get("kurz")),
-    ])
-
-    severe_kw = [
-        "schimmel", "bud rot", "blütenfäule", "grauschimmel", "botrytis",
-        "wurzelfäule", "stammfäule",
-        "virus", "viroid", "hlv",
-        "komplettverlust", "stark fortgeschritten"
-    ]
-    moderate_kw = [
-        "lockout", "ph", "staunässe", "überwässer", "unterwässer",
-        "salz", "ec", "hitzestress", "kältestress",
-        "spinnmilb", "thrips", "blattlaus", "mehltau"
-    ]
-
-    # Score clamp
-    try:
-        score = int(round(float(qual.get("score", 70))))
-    except Exception:
-        score = 70
-    qual["score"] = max(0, min(100, score))
-
-    # Ampel enforcement
-    ampel = str(analyse.get("ampel", "gelb")).lower().strip()
-    if any(k in text_blob for k in severe_kw):
-        ampel = "rot"
-    elif any(k in text_blob for k in moderate_kw):
-        ampel = "gelb"
-    elif qual["score"] < 60:
-        ampel = "gelb"
-    elif ampel not in ("gruen", "gelb", "rot"):
-        ampel = "gelb"
-    analyse["ampel"] = ampel
-
-    # Profi rule: always on RED
-    if analyse["ampel"] == "rot":
-        emp["profi"]["empfohlen"] = True
-        if not emp["profi"].get("grund"):
-            emp["profi"]["grund"] = "Ampel ROT: hohes Risiko bzw. starker Schaden – bitte Profi/erfahrenen Grower hinzuziehen."
-
-    # Dünge-Regeln: konservativ (Beta)
-    allow = bool(emp["duenge_empfehlung"].get("erlaubt", False))
-    cat = str(analyse.get("kategorie", "")).lower()
-    hp = str(analyse.get("hauptproblem", "")).lower()
-
-    fert_block_kw = ["lockout", "ph_problem", "ueberwaesserung", "unterwaesserung", "wurzelzone", "umweltstress"]
-    if analyse.get("lockout_verdacht") or any(k in cat for k in fert_block_kw) or any(k in hp for k in ["lockout", "ph", "überwässer", "unterwässer", "wurzel", "salz", "ec", "hitze", "kälte", "licht", "luftfeuchte"]):
-        allow = False
-
-    # Only allow for clear nutrient topics with high confidence & good photo quality
-    if not allow:
-        if cat in ("unterduengung", "ueberduengung", "mangel", "ueberschuss") and analyse["wahrscheinlichkeit"] >= 85 and qual["score"] >= 80 and analyse["ampel"] != "rot" and not bool(uns.get("ist_unsicher")):
-            allow = True
-
-    emp["duenge_empfehlung"]["erlaubt"] = bool(allow)
-    if not allow:
-        emp["duenge_empfehlung"].setdefault("grund", "Konservativ: Lockout/pH/Wasser/Wurzelzone/Umweltstress möglich oder nicht eindeutig ausgeschlossen.")
-        emp["duenge_empfehlung"].setdefault("hinweis", "Keine konkrete Dünge-/Dosierempfehlung. Erst Ursache prüfen (pH, Gießverhalten, Wurzelzone) und Verlauf beobachten.")
-    else:
-        emp["duenge_empfehlung"].setdefault("grund", "Klares Nährstoff-Thema bei guter Bildqualität und hoher Wahrscheinlichkeit.")
-        emp["duenge_empfehlung"].setdefault("hinweis", "Wenn du eingreifst: sehr vorsichtig, schrittweise, 48–72h beobachten.")
-
-    result_json["analyse"] = analyse
-    result_json["qualitaet"] = qual
-    result_json["empfehlung"] = emp
-    result_json["unsicherheit"] = uns
-    # -----------------------------------------------------------------------
 
         # ---- legacy output for Beta/Pro-UI compatibility ----
     def _legacy_from_new_schema(r: Dict[str, Any]) -> Dict[str, Any]:
@@ -677,7 +570,94 @@ async def diagnose(
         }
         return legacy
 
+
+
+def _nested_from_new_schema(result_json: dict, legacy: dict, lang: str) -> dict:
+    """Return result in the NEW nested schema expected by the updated Flutter UI,
+    while keeping legacy flat keys for backward compatibility."""
+    analyse = {
+        "hauptproblem": legacy.get("hauptproblem", ""),
+        "kategorie": legacy.get("kategorie", ""),
+        "wahrscheinlichkeit": legacy.get("wahrscheinlichkeit", 0),
+        "symptome": (result_json.get("sichtbare_symptome") or []),
+        "moegliche_ursachen": (result_json.get("moegliche_ursachen") or []),
+        "differential_diagnosen": (result_json.get("differential_diagnosen") or []),
+        "lockout_verdacht": bool(result_json.get("lockout_verdacht", False)),
+        "lockout_gruende": (result_json.get("lockout_gruende") or []),
+        "lockout_risiko": (result_json.get("lockout_risiko") or ""),
+    }
+
+    score = int(legacy.get("bildqualitaet_score") or 0)
+    qualitaet_ok = bool(score >= 70)
+
+    # If the model already provided explicit photo recommendations, pass them through
+    foto_tipps = legacy.get("foto_empfehlungen") or []
+    if not isinstance(foto_tipps, list):
+        foto_tipps = []
+
+    qualitaet = {
+        "qualitaet_ok": qualitaet_ok,
+        "score": score,
+        "hinweis": legacy.get("hinweis_bildqualitaet", ""),
+        "gruende": ([] if qualitaet_ok else ["Bildqualität ist zu niedrig für eine sichere Einschätzung."]),
+        "foto_tipps": foto_tipps,
+    }
+
+    ist_unsicher = bool(legacy.get("ist_unsicher", False)) or bool(analyse["lockout_verdacht"])
+    unsicherheit = {
+        "ist_unsicher": ist_unsicher,
+        "benoetigte_fotos": foto_tipps if ist_unsicher else [],
+    }
+
+    # Cause-based safety: lockout -> no fertilizer recommendation
+    duengen_erlaubt = not analyse["lockout_verdacht"]
+    duenge_empfehlung = {
+        "erlaubt": duengen_erlaubt,
+        "grund": (
+            "Lockout/pH/EC-Verdacht – erst Ursache prüfen, nicht blind düngen."
+            if not duengen_erlaubt
+            else "Kein Lockout-Verdacht erkannt."
+        ),
+    }
+
+    profi_empfohlen = bool(analyse["lockout_verdacht"]) or int(analyse.get("wahrscheinlichkeit", 0) or 0) < 60
+    profi = {
+        "empfohlen": profi_empfohlen,
+        "grund": (
+            "Bei Lockout-/Mehrfachsymptomen oder niedriger Sicherheit bitte Profi/erfahrenen Grower hinzuziehen."
+            if profi_empfohlen
+            else ""
+        ),
+    }
+
+    empfehlung = {
+        "kurz": legacy.get("beschreibung", ""),
+        "naechste_schritte": (legacy.get("sofort_massnahmen") or []),
+        "wann_experte": (
+            "Wenn sich die Symptome innerhalb von 48–72h verschlechtern oder du unsicher bist."
+            if profi_empfohlen
+            else ""
+        ),
+        "duenge_empfehlung": duenge_empfehlung,
+        "profi": profi,
+    }
+
+    sicherheit = {"haftungsausschluss_kurz": t(lang, "legal_text")}
+
+    # NEW result object: nested + keep legacy keys (for older UI parts)
+    return {
+        "analyse": analyse,
+        "qualitaet": qualitaet,
+        "unsicherheit": unsicherheit,
+        "empfehlung": empfehlung,
+        "sicherheit": sicherheit,
+        **legacy,
+    }
+
     legacy_result = _legacy_from_new_schema(result_json)
+
+
+    nested_result = _nested_from_new_schema(result_json, legacy_result, lang)
     # -----------------------------------------------
 
 
@@ -746,7 +726,12 @@ async def diagnose(
         "status": "ok",
         "already_analyzed": False,
         "image_hash": img_hash,
-        "result": legacy_result,
+        "result": nested_result,
+            # Legacy top-level keys (temporary UI compatibility)
+            "hinweis_bildqualitaet": legacy_result.get("hinweis_bildqualitaet"),
+            "betroffene_teile": legacy_result.get("betroffene_teile"),
+            "sofort_massnahmen": legacy_result.get("sofort_massnahmen"),
+            "foto_empfehlungen": legacy_result.get("foto_empfehlungen"),
         "debug_photo_position": photo_position, 
         "debug_shot_type": shot_type,
         "legal": {

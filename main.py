@@ -116,6 +116,17 @@ def build_prompt(lang: str, photo_position: str, shot_type: str):
 # =========================
 # DIAGNOSE ENDPOINT
 # =========================
+# -------------------------
+# LANGUAGE NORMALIZATION
+# -------------------------
+SUPPORTED_LANGS = {"de", "en", "fr", "es", "it", "pt", "nl", "pl", "cs"}
+DEFAULT_LANG = "de"  # falls du das schon irgendwo hast: diese Zeile weglassen
+
+def normalize_lang(raw: Optional[str]) -> str:
+    if not raw:
+        return DEFAULT_LANG
+    l = raw.strip().lower().replace("_", "-").split("-")[0]  # "en-US" -> "en"
+    return l if l in SUPPORTED_LANGS else DEFAULT_LANG
 
 @app.post("/diagnose")
 async def diagnose(

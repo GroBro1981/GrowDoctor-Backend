@@ -133,174 +133,92 @@ def clamp_int(v: Any, lo: int, hi: int, default: int) -> int:
         x = int(round(float(v)))
         return max(lo, min(hi, x))
     except Exception:
-        pass
+        return default
 
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        chunk = text[start:end + 1]
-        try:
-            return json.loads(chunk)
-        except Exception:
-            return {}
-    return {}
+def compute_ampel(wahrscheinlichkeit: int, ist_unsicher: bool) -> str:
+    if ist_unsicher:
+        return "gelb"
+    if wahrscheinlichkeit >= 70:
+        return "gruen"
+    if wahrscheinlichkeit >= 40:
+        return "gelb"
+    return "rot"
 
+def build_system_prompt() -> str:
+    return (
+        "You are GrowDoctor, a plant health diagnostic assistant.\n"
+        "Return ONLY valid JSON (no markdown, no extra text).\n"
+        "Use exactly the schema provided. Never use null.\n"
+        "Use empty string \"\" for missing text and [] for missing lists.\n"
+        "\n"
+        "Critical visual rule (MUST): Do NOT label trichomes/resin glands as mold.\n"
+        "Trichomes look like sparkling/milky/amber crystal heads on buds.\n"
+        "Mold is fuzzy/cottony web-like growth, powdery coating, or slimy rot.\n"
+        "If you cannot clearly see fuzzy/mycelium/powder, do NOT claim mold.\n"
+        "Instead set ist_unsicher=true and request macro close-ups + environment info.\n"
+        "\n"
+        "Plant physiology (MUST): Always consider leaf age/location.\n"
+        "- Older/lower leaves: more likely mobile nutrient issues (N, P, K, Mg) or senescence.\n"
+        "- Newer/top growth: more likely immobile issues (Ca, Fe, S, B, Mn, Zn) or pH/lockout.\n"
+        "If multiple symptoms conflict, prioritize root-zone/pH/EC/lockout explanation.\n"
+    )
 
-    # 5) OpenAI call (image + prompt)  ✅ NEUER BLOCK
-    data_url = _to_data_url(image, data)
-    system_prompt, user_prompt = _diagnose_prompt(lang, photo_position, shot_type)
+def build_user_prompt(lang: str, photo_position: str, shot_type: str) -> str:
+    return (
+        f"Language: {lang}\n"
+        f"Photo position: {photo_position}\n"
+        f"Shot type: {shot_type}\n\n"
+        "Return JSON with EXACTLY these keys:\n"
+        "{\n"
+        '  "hauptproblem": string,\n'
+        '  "kategorie": string,\n'
+        '  "wahrscheinlichkeit": number (0-100),\n'
+        '  "beschreibung": string,\n'
+        '  "betroffene_teile": array of strings,\n'
+        '  "sichtbare_symptome": array of strings,\n'
+        '  "moegliche_ursachen": array of strings,\n'
+        '  "sofort_massnahmen": array of strings,\n'
+        '  "vorbeugung": array of strings,\n'
+        '  "bildqualitaet_score": number (0-100),\n'
+        '  "hinweis_bildqualitaet": string,\n'
+        '  "ist_unsicher": boolean,\n'
+        '  "unsicher_grund": string,\n'
+        '  "duengen_erlaubt": boolean,\n'
+        '  "profi_empfohlen": boolean,\n'
+        '  "profi_grund": string\n'
+        "}\n\n"
+        "Rules:\n"
+        "- If unsure: set ist_unsicher=true and fill unsicher_grund.\n"
+        "- If lockout/pH suspected: set duengen_erlaubt=false and recommend measurement.\n"
+        "- If mold is not clearly visible: do NOT claim mold.\n"
+    )
 
-    try:
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_prompt},
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                    ],
-                },
-            ],
-            # garantiert JSON (wichtig für App/Parsing)
-            response_format={"type": "json_object"},
-            temperature=0.2,
-        )
-        content = resp.choices[0].message.content or "{}"
-        result_json = json.loads(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"openai_error: {str(e)}")
+def normalize_result(raw: Dict[str, Any]) -> Dict[str, Any]:
+    wahrscheinlichkeit = clamp_int(raw.get("wahrscheinlichkeit"), 0, 100, 50)
+    ist_unsicher = bool(raw.get("ist_unsicher", False))
 
-    # 6) Post-Validation + harte Defaults (damit App nie '0%' oder leere Felder zeigt)
-    def _int0(x, default=0):
-        try:
-            return int(round(float(x)))
-        except Exception:
-            return default
-
-    # Pflichtfelder absichern
-    if "ist_cannabis" not in result_json:
-        result_json["ist_cannabis"] = True
-
-    result_json["bildqualitaet_score"] = max(0, min(100, _int0(result_json.get("bildqualitaet_score", 0), 0)))
-
-    # Wahrscheinlichkeit absichern: wenn fehlend/0 aber Diagnose vorhanden -> konservativ 70 setzen
-    prob = _int0(result_json.get("wahrscheinlichkeit", 0), 0)
-    if prob <= 0 and str(result_json.get("hauptproblem", "")).strip():
-        prob = 70
-    result_json["wahrscheinlichkeit"] = max(1, min(100, prob)) if str(result_json.get("hauptproblem", "")).strip() else max(0, min(100, prob))
-
-    # Nie "Unbekannt" als Text zulassen
-    def _no_unknown(s: str) -> str:
-        s = (s or "").strip()
-        if not s:
-            return s
-        if s.lower() == "unbekannt":
-            return "Verdacht auf Mischbild (weitere Infos nötig)"
-        return s
-
-    result_json["hauptproblem"] = _no_unknown(result_json.get("hauptproblem", ""))
-    result_json["beschreibung"] = _no_unknown(result_json.get("beschreibung", ""))
-
-    # Listen defaults
-    for k in ["foto_empfehlungen", "sichtbare_symptome", "moegliche_ursachen", "lockout_gruende", "sofort_massnahmen", "vorbeugung"]:
-        if k not in result_json or not isinstance(result_json[k], list):
-            result_json[k] = []
-
-    if "differential_diagnosen" not in result_json or not isinstance(result_json["differential_diagnosen"], list):
-        result_json["differential_diagnosen"] = []
-
-    # Lockout defaults
-    if "lockout_verdacht" not in result_json:
-        result_json["lockout_verdacht"] = False
-
-    # Düngeregel final erzwingen (entscheidender Schutz!)
-    if "duenge_empfehlung" not in result_json or not isinstance(result_json["duenge_empfehlung"], dict):
-        result_json["duenge_empfehlung"] = {"erlaubt": False, "grund": "", "hinweis": ""}
-
-    # Mehrfachbild? -> Düngung aus
-    multi = False
-    if len(result_json["differential_diagnosen"]) >= 2:
-        # Wenn die Liste echte Inhalte hat
-        probs = [d for d in result_json["differential_diagnosen"] if isinstance(d, dict) and str(d.get("problem", "")).strip()]
-        if len(probs) >= 2:
-            multi = True
-
-    if result_json["lockout_verdacht"] or multi or result_json["bildqualitaet_score"] < 70:
-        result_json["duenge_empfehlung"]["erlaubt"] = False
-        if not result_json["duenge_empfehlung"].get("grund"):
-            result_json["duenge_empfehlung"]["grund"] = "Lockout/pH/Wasserstress oder Mehrfachbild bzw. Bildqualität – erst Ursache prüfen."
-        if not result_json["duenge_empfehlung"].get("hinweis"):
-            result_json["duenge_empfehlung"]["hinweis"] = "Keine konkrete Dünge-/Dosierempfehlung. Bitte pH, Gießverhalten und Wurzelzone prüfen und Verlauf beobachten."
-    else:
-        # Nur wenn wirklich sauber
-        if result_json["duenge_empfehlung"].get("erlaubt") is not True:
-            result_json["duenge_empfehlung"]["erlaubt"] = True
-            if not result_json["duenge_empfehlung"].get("grund"):
-                result_json["duenge_empfehlung"]["grund"] = "Ein klares Hauptproblem bei guter Bildqualität und ohne Lockout-Hinweise."
-            if not result_json["duenge_empfehlung"].get("hinweis"):
-                result_json["duenge_empfehlung"]["hinweis"] = "Wenn du eingreifst, mache es vorsichtig und schrittweise – beobachte 48–72h."
-
-    # 7) Cache speichern
-    analysis_cache[img_hash] = {
-        "ts": time.time(),
-        "result": result_json,
-        "meta": {
-            "content_type": image.content_type,
-            "bytes": len(data),
-        },
+    result: Dict[str, Any] = {
+        "hauptproblem": ensure_str(raw.get("hauptproblem")),
+        "kategorie": ensure_str(raw.get("kategorie")),
+        "wahrscheinlichkeit": wahrscheinlichkeit if wahrscheinlichkeit > 0 else 1,
+        "beschreibung": ensure_str(raw.get("beschreibung")),
+        "betroffene_teile": ensure_list(raw.get("betroffene_teile")),
+        "sichtbare_symptome": ensure_list(raw.get("sichtbare_symptome")),
+        "moegliche_ursachen": ensure_list(raw.get("moegliche_ursachen")),
+        "sofort_massnahmen": ensure_list(raw.get("sofort_massnahmen")),
+        "vorbeugung": ensure_list(raw.get("vorbeugung")),
+        "bildqualitaet_score": clamp_int(raw.get("bildqualitaet_score"), 0, 100, 60),
+        "hinweis_bildqualitaet": ensure_str(raw.get("hinweis_bildqualitaet")),
+        "ist_unsicher": ist_unsicher,
+        "unsicher_grund": ensure_str(raw.get("unsicher_grund")),
+        "duengen_erlaubt": bool(raw.get("duengen_erlaubt", True)),
+        "profi_empfohlen": bool(raw.get("profi_empfohlen", False)),
+        "profi_grund": ensure_str(raw.get("profi_grund")),
     }
+    result["ampel"] = compute_ampel(result["wahrscheinlichkeit"], result["ist_unsicher"])
+    return result
 
-    # 8) Return (App erwartet result flach!)
-    return {
-        "status": "ok",
-        "already_analyzed": False,
-        "image_hash": img_hash,
-        "result": result_json,
-        "debug_photo_position": photo_position,
-        "debug_shot_type": shot_type,
-        "legal": {
-            "disclaimer_title": t(lang, "disclaimer_title"),
-            "disclaimer_body": t(lang, "disclaimer_body"),
-            "privacy_title": t(lang, "privacy_title"),
-            "privacy_body": t(lang, "privacy_body"),
-        },
-    }
-
-
-
-
-# =========================
-# FastAPI app
-# =========================
-app = FastAPI(title=APP_NAME)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Beta: ok. Später einschränken.
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-
-@app.get("/")
-def root():
-    return {
-        "status": "ok",
-        "service": APP_NAME,
-        "model": MODEL_NAME,
-    }
-
-
-@app.get("/legal")
-def legal(lang: str = DEFAULT_LANG):
-    """
-    Backend liefert Texte für App-Seiten (ohne Website nötig).
-    """
+def legal_block(lang: str) -> Dict[str, str]:
     return {
         "disclaimer_title": t(lang, "disclaimer_title"),
         "disclaimer_body": t(lang, "disclaimer_body"),

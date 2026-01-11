@@ -13,7 +13,8 @@ from openai import OpenAI
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 DEFAULT_LANG = "de"
-SUPPORTED_LANGS = {"de", "en", "fr", "es", "it", "pt", "nl", "pl", "cs"}
+SUPPORTED_LANGS = set(TEXTS.keys())
+
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 

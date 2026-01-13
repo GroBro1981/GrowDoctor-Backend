@@ -10,6 +10,15 @@ from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
+BETA_FLOWER_NO_MATURITY_RULE = """
+IMPORTANT (BETA RULE):
+If the image shows a cannabis flower/bud:
+- Do NOT analyze maturity or harvest timing
+- Do NOT mention trichome colors (clear, milky, cloudy, amber)
+- Do NOT give harvest or ripeness advice
+- ONLY state whether the flower looks healthy or shows visible problems
+- Focus on mold, pests, rot, or visible damage
+"""
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 DEFAULT_LANG = "de"
@@ -148,6 +157,7 @@ def build_system_prompt() -> str:
     return (
         "You are GrowDoctor, a plant health diagnostic assistant.\n"
         "Return ONLY valid JSON (no markdown, no extra text).\n"
+        "FLOWER RULE (MUST): If the photo shows buds or flowers, DO NOT assess ripeness or maturity. Only state whether the buds look HEALTHY or NOT HEALTHY and whether visible mold, rot, pests or other problems are present. Never mention trichomes, harvest timing or maturity stages. If unsure, set ist_unsicher=true.\n"
         "Use exactly the schema provided. Never use null.\n"
         "Use empty string \"\" for missing text and [] for missing lists.\n"
         "\n"

@@ -233,6 +233,53 @@ def health():
 @app.get("/metrics")
 def metrics():
     return {"cache_items": len(analysis_cache), "model": MODEL_NAME, "ts": int(time.time())}
+def cannabis_check(data_url: str, lang_final: str) -> dict:
+    """
+    Returns:
+      {
+        "ist_cannabis": bool,
+        "confidence": int 0-100,
+        "erkannt_als": str
+      }
+    Conservative: if unsure => false.
+    """
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict image classifier.\n"
+                        "Decide if the primary subject is a cannabis plant or cannabis plant parts "
+                        "(leaf, stem, flower/bud).\n"
+                        "Return ONLY valid JSON with keys:\n"
+                        "ist_cannabis (boolean), confidence (0-100 integer), erkannt_als (short string).\n"
+                        "If unsure, set ist_cannabis=false.\n"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Classify the image. JSON only."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                },
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+        )
+        raw = resp.choices[0].message.content or "{}"
+        j = json.loads(raw)
+        return {
+            "ist_cannabis": bool(j.get("ist_cannabis", False)),
+            "confidence": int(j.get("confidence", 0) or 0),
+            "erkannt_als": str(j.get("erkannt_als", "") or ""),
+        }
+    except Exception:
+        # Fail closed: if check fails, do NOT diagnose random images
+        return {"ist_cannabis": False, "confidence": 0, "erkannt_als": t(lang_final, "unknown")}
+
 
 @app.post("/diagnose")
 async def diagnose(
@@ -278,6 +325,31 @@ async def diagnose(
         }
 
     data_url = to_data_url(image.content_type, data)
+        # --- Cannabis pre-check (before diagnosis) ---
+    check = cannabis_check(data_url, lang_final)
+
+    # Conservative threshold (tweakable)
+    if (not check["ist_cannabis"]) or (check["confidence"] < 70):
+        return {
+            "status": "ok",
+            "already_analyzed": False,
+            "message": t(lang_final, "not_cannabis_hint"),
+            "image_hash": img_hash,
+            "ist_cannabis": False,
+            "cannabis_confidence": check["confidence"],
+            "erkannt_als": check["erkannt_als"],
+            "result": None,
+            "legal": legal_block(lang_final),
+            "debug": {
+                "lang": lang_final,
+                "photo_position": photo_position,
+                "shot_type": shot_type,
+                "client_id": client_id or "",
+                "model": MODEL_NAME,
+                "cache": False,
+            },
+        }
+
 
     try:
         resp = client.chat.completions.create(

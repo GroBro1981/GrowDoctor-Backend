@@ -10,15 +10,6 @@ from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
-BETA_FLOWER_NO_MATURITY_RULE = """
-IMPORTANT (BETA RULE):
-If the image shows a cannabis flower/bud:
-- Do NOT analyze maturity or harvest timing
-- Do NOT mention trichome colors (clear, milky, cloudy, amber)
-- Do NOT give harvest or ripeness advice
-- ONLY state whether the flower looks healthy or shows visible problems
-- Focus on mold, pests, rot, or visible damage
-"""
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 DEFAULT_LANG = "de"
@@ -157,13 +148,6 @@ def build_system_prompt() -> str:
     return (
         "You are GrowDoctor, a plant health diagnostic assistant.\n"
         "Return ONLY valid JSON (no markdown, no extra text).\n"
-        "If NO plant problem is detected (healthy plant / Ampel = green):\n"
-        "- Keep the description VERY short (MAX 1 sentence).\n"
-        "- Do NOT explain normal or healthy visual features.\n"
-        "- Do NOT describe trichomes, pistils, color, structure, or ripeness.\n"
-        "- Focus only on: no visible problems detected.\n"
-
-        "FLOWER RULE (MUST): If the photo shows buds or flowers, DO NOT assess ripeness or maturity. Only state whether the buds look HEALTHY or NOT HEALTHY and whether visible mold, rot, pests or other problems are present. Never mention trichomes, harvest timing or maturity stages. If unsure, set ist_unsicher=true.\n"
         "Use exactly the schema provided. Never use null.\n"
         "Use empty string \"\" for missing text and [] for missing lists.\n"
         "\n"
@@ -177,16 +161,6 @@ def build_system_prompt() -> str:
         "- Older/lower leaves: more likely mobile nutrient issues (N, P, K, Mg) or senescence.\n"
         "- Newer/top growth: more likely immobile issues (Ca, Fe, S, B, Mn, Zn) or pH/lockout.\n"
         "If multiple symptoms conflict, prioritize root-zone/pH/EC/lockout explanation.\n"
-        "OUTPUT STYLE (BETA): Keep explanations concise. Use at most 2–3 short sentences per section. Avoid repetition and long descriptions. Be factual and practical.\n"
-        "HARD LENGTH LIMITS (BETA): "
-        "- hauptproblem: max 1 short sentence. "
-        "- beschreibung: max 2 short sentences. "
-        "- sichtbare_symptome: max 3 bullet points. "
-        "- moegliche_ursachen: max 3 bullet points. "
-        "- sofort_massnahmen: max 3 bullet points. "
-        "- vorbeugung: max 2 bullet points. "
-        "Never exceed these limits.\n"
-
     )
 
 def build_user_prompt(lang: str, photo_position: str, shot_type: str) -> str:
@@ -260,4 +234,89 @@ def health():
 def metrics():
     return {"cache_items": len(analysis_cache), "model": MODEL_NAME, "ts": int(time.time())}
 
+@app.post("/diagnose")
+async def diagnose(
+    image: UploadFile = File(...),
+    lang: Optional[str] = Form(None),
+    language: Optional[str] = Form(None),
+    locale: Optional[str] = Form(None),
+    age_confirmed: bool = Form(False),
+    photo_position: str = Form("unknown"),
+    shot_type: str = Form("unknown"),
+    client_id: Optional[str] = Form(None),
+    force: bool = Form(False),
+):
+    lang_final = normalize_lang(lang or language or locale)
 
+    if not age_confirmed:
+        raise HTTPException(status_code=400, detail=t(lang_final, "age_not_confirmed"))
+
+    data = await image.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="No image data")
+
+    img_hash = sha256_bytes(data)
+    cache_key = f"{img_hash}:{lang_final}"
+
+    cached = analysis_cache.get(cache_key)
+    if cached and not force:
+        return {
+            "status": "ok",
+            "already_analyzed": True,
+            "message": t(lang_final, "already_analyzed"),
+            "image_hash": img_hash,
+            "result": cached["result"],
+            "legal": legal_block(lang_final),
+            "debug": {
+                "lang": lang_final,
+                "photo_position": photo_position,
+                "shot_type": shot_type,
+                "client_id": client_id or "",
+                "model": MODEL_NAME,
+                "cache": True,
+            },
+        }
+
+    data_url = to_data_url(image.content_type, data)
+
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": build_system_prompt()},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": build_user_prompt(lang_final, photo_position, shot_type)},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                },
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+        raw_text = resp.choices[0].message.content or "{}"
+        raw_json = json.loads(raw_text)
+        result = normalize_result(raw_json)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"openai_error: {str(e)}")
+
+    analysis_cache[cache_key] = {"ts": time.time(), "result": result}
+
+    return {
+        "status": "ok",
+        "already_analyzed": False,
+        "message": "",
+        "image_hash": img_hash,
+        "result": result,
+        "legal": legal_block(lang_final),
+        "debug": {
+            "lang": lang_final,
+            "photo_position": photo_position,
+            "shot_type": shot_type,
+            "client_id": client_id or "",
+            "model": MODEL_NAME,
+            "cache": False,
+        },
+    }

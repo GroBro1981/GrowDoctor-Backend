@@ -287,6 +287,34 @@ def cannabis_check(data_url: str, lang_final: str) -> dict:
     except Exception:
         # Fail closed: if check fails, do NOT diagnose random images
         return {"ist_cannabis": False, "confidence": 0, "erkannt_als": t(lang_final, "unknown")}
+    def has_text_overlay(img_bytes: bytes) -> bool:
+        """
+        Detects presence of text/marker overlays WITHOUT reading text.
+        Conservative: returns True if strong likelihood of text/marker exists.
+        """
+        try:
+            import cv2
+            import numpy as np
+
+            arr = np.frombuffer(img_bytes, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is None:
+                return False
+
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+            # Edge detection (text has sharp edges)
+            edges = cv2.Canny(gray, 100, 200)
+
+            # Count edge density
+            edge_ratio = edges.mean() / 255.0
+
+            # Marker/text usually spikes edge density
+            return edge_ratio > 0.06  # conservative threshold
+
+        except Exception:
+            return False
+
 
 
 @app.post("/diagnose")
@@ -307,6 +335,42 @@ async def diagnose(
         raise HTTPException(status_code=400, detail=t(lang_final, "age_not_confirmed"))
 
     data = await image.read()
+    if has_text_overlay(data):
+        return {
+            "status": "ok",
+            "already_analyzed": False,
+            "message": (
+                "Text oder Markierungen im Bild erkannt. "
+                "Bitte lade ein unbearbeitetes Foto ohne Beschriftungen oder Marker hoch. "
+                "Text im Bild wird aus Datenschutz- und Qualitätsgründen nicht ausgewertet."
+            ),
+            "image_hash": sha256_bytes(data),
+            "ist_cannabis": None,
+            "result": {
+                "hauptproblem": "Text im Bild erkannt",
+                "kategorie": "bild_ungeeignet",
+                "wahrscheinlichkeit": 0,
+                "beschreibung": (
+                    "Auf dem Bild wurden Text oder Markierungen erkannt. "
+                    "Für eine zuverlässige Diagnose wird ein unbearbeitetes Foto benötigt."
+                ),
+                "betroffene_teile": [],
+                "sichtbare_symptome": [],
+                "moegliche_ursachen": ["Beschriftetes oder markiertes Bild"],
+                "sofort_massnahmen": ["Neues Foto ohne Text oder Marker aufnehmen"],
+                "vorbeugung": ["Keine Hinweise, Pfeile oder Text auf das Foto schreiben"],
+                "bildqualitaet_score": 100,
+                "hinweis_bildqualitaet": "",
+                "ist_unsicher": True,
+                "unsicher_grund": "Text im Bild erkannt",
+                "duengen_erlaubt": False,
+                "profi_empfohlen": False,
+                "profi_grund": "",
+                "ampel": "gelb"
+            },
+            "legal": legal_block(lang_final),
+        }
+
     if not data:
         raise HTTPException(status_code=400, detail="No image data")
 

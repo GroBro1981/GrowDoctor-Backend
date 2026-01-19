@@ -333,7 +333,12 @@ async def diagnose(
         return {
             "status": "ok",
             "already_analyzed": False,
-            "message": t(lang_final, "not_cannabis_hint"),
+            "message": (
+            "Kein Cannabis erkannt. "
+            f"Das Bild wurde als „{check['erkannt_als']}“ erkannt. "
+            "Bitte lade ein Foto einer Cannabispflanze hoch."
+            ),
+
             "image_hash": img_hash,
             "ist_cannabis": False,
             "cannabis_confidence": check["confidence"],

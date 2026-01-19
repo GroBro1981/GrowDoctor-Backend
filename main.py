@@ -343,7 +343,29 @@ async def diagnose(
             "ist_cannabis": False,
             "cannabis_confidence": check["confidence"],
             "erkannt_als": check["erkannt_als"],
-            "result": None,
+            "result": {
+            "hauptproblem": "Kein Cannabis erkannt",
+            "kategorie": "kein_cannabis",
+            "wahrscheinlichkeit": min(99, max(1, int(check["confidence"]))),
+            "beschreibung": (
+                f"Das Bild wurde als „{check['erkannt_als']}“ erkannt und scheint keine Cannabispflanze zu zeigen. "
+                "Bitte lade ein Foto einer Cannabispflanze hoch."
+            ),
+            "betroffene_teile": [],
+            "sichtbare_symptome": [],
+            "moegliche_ursachen": ["Falsches Motiv (keine Cannabispflanze)"],
+            "sofort_massnahmen": ["Bitte ein Foto einer Cannabispflanze hochladen"],
+            "vorbeugung": ["Achte darauf, dass die Pflanze gut sichtbar und scharf im Bild ist"],
+            "bildqualitaet_score": 0,
+            "hinweis_bildqualitaet": "",
+            "ist_unsicher": False,
+            "unsicher_grund": "",
+            "duengen_erlaubt": False,
+            "profi_empfohlen": False,
+            "profi_grund": "",
+            "ampel": "gelb"
+        },
+
             "legal": legal_block(lang_final),
             "debug": {
                 "lang": lang_final,

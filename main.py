@@ -329,6 +329,48 @@ async def diagnose(
     client_id: Optional[str] = Form(None),
     force: bool = Form(False),
 ):
+    from datetime import datetime
+from pathlib import Path
+
+FEEDBACK_DIR = Path(os.getenv("FEEDBACK_DIR", "./feedback_store"))
+FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+
+@app.post("/feedback")
+async def feedback(
+    message: str = Form(...),
+    contact_email: Optional[str] = Form(None),
+    lang: Optional[str] = Form(None),
+    app_version: Optional[str] = Form(None),
+    client_id: Optional[str] = Form(None),
+):
+    lang_final = normalize_lang(lang)
+
+    # 1) Immer speichern (Failsafe)
+    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    safe_id = hashlib.sha256((message + (client_id or "") + ts).encode("utf-8")).hexdigest()[:12]
+    filename = FEEDBACK_DIR / f"{ts}_{safe_id}.json"
+
+    payload = {
+        "ts_utc": ts,
+        "message": message.strip(),
+        "contact_email": (contact_email or "").strip(),
+        "app_version": (app_version or "").strip(),
+        "client_id": (client_id or "").strip(),
+    }
+
+    try:
+        filename.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        stored = True
+    except Exception as e:
+        stored = False
+        return {"ok": False, "stored": False, "mail_sent": False, "error": f"store_failed: {e}"}
+
+    # 2) Mail optional (erstmal aus, bis SMTP sauber steht)
+    # mail_sent = send_feedback_mail(payload)  # später
+    mail_sent = False
+
+    return {"ok": True, "stored": stored, "mail_sent": mail_sent}
+
     lang_final = normalize_lang(lang or language or locale)
 
     if not age_confirmed:

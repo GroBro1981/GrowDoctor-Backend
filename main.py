@@ -6,10 +6,11 @@ import time
 import base64
 import hashlib
 from typing import Optional, Dict, Any, List
-
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
+from datetime import datetime
+
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 DEFAULT_LANG = "de"

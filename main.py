@@ -350,6 +350,9 @@ def _send_feedback_mail(payload: Dict[str, Any]) -> bool:
     if not (FEEDBACK_MAIL_TO and SMTP_HOST and SMTP_USER and SMTP_PASS):
         return False
 
+    smtp_tls = os.getenv("SMTP_TLS", "true").lower() == "true"
+    smtp_ssl = os.getenv("SMTP_SSL", "false").lower() == "true"
+
     subject = "GrowDoctor Feedback"
     body = (
         "Neues Feedback\n\n"
@@ -367,13 +370,21 @@ def _send_feedback_mail(payload: Dict[str, Any]) -> bool:
     msg["To"] = FEEDBACK_MAIL_TO
     msg.set_content(body)
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
-        server.ehlo()
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
-        server.send_message(msg)
+    if smtp_ssl:
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+    else:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.ehlo()
+            if smtp_tls:
+                server.starttls()
+                server.ehlo()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
 
     return True
+
 
 
 # -----------------------------
@@ -422,13 +433,13 @@ async def feedback(
     try:
         mail_sent = _send_feedback_mail(payload)
     except Exception as e:
-        # Speichern war erfolgreich, Mail ggf. nicht
         mail_sent = False
-        # optional: Mail-Fehler in Datei loggen
+        print("MAIL_ERROR:", repr(e))
         try:
-            (FEEDBACK_DIR / f"{ts}_{safe_id}.mail_error.txt").write_text(str(e), encoding="utf-8")
+            (FEEDBACK_DIR / f"{ts}_{safe_id}.mail_error.txt").write_text(repr(e), encoding="utf-8")
         except Exception:
             pass
+
 
     return {"ok": True, "stored": stored, "mail_sent": mail_sent}
 

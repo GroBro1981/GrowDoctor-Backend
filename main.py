@@ -5,8 +5,8 @@ import json
 import time
 import base64
 import hashlib
-import smtplib
-from email.message import EmailMessage
+import requests
+
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 

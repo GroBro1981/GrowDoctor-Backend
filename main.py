@@ -6,7 +6,6 @@ import time
 import base64
 import hashlib
 import requests
-
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -30,14 +29,18 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 FEEDBACK_DIR = Path(os.getenv("FEEDBACK_DIR", "./feedback_store"))
 FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
 
-# Feedback mail
-FEEDBACK_MAIL_ENABLED = os.getenv("FEEDBACK_MAIL_ENABLED", "false").lower() == "true"
-FEEDBACK_MAIL_TO = os.getenv("FEEDBACK_MAIL_TO", "")
-SMTP_HOST = os.getenv("SMTP_HOST", "")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASS = os.getenv("SMTP_PASS", "")
-SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER or "noreply@example.com")
+
+def env_true(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"true", "1", "yes", "on"}
+
+
+# Feedback mail (SendGrid via HTTPS)
+FEEDBACK_MAIL_ENABLED = env_true("FEEDBACK_MAIL_ENABLED", "false")
+FEEDBACK_MAIL_PROVIDER = os.getenv("FEEDBACK_MAIL_PROVIDER", "").strip().lower()  # expected: "sendgrid"
+FEEDBACK_MAIL_TO = os.getenv("FEEDBACK_MAIL_TO", "").strip()
+
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "").strip()
+SENDGRID_FROM = os.getenv("SENDGRID_FROM", "").strip()
 
 
 # -----------------------------
@@ -347,14 +350,15 @@ def cannabis_check(data_url: str) -> dict:
 def _send_feedback_mail(payload: Dict[str, Any]) -> bool:
     if not FEEDBACK_MAIL_ENABLED:
         return False
-    if not (FEEDBACK_MAIL_TO and SMTP_HOST and SMTP_USER and SMTP_PASS):
+
+    if FEEDBACK_MAIL_PROVIDER != "sendgrid":
         return False
 
-    smtp_tls = os.getenv("SMTP_TLS", "true").lower() == "true"
-    smtp_ssl = os.getenv("SMTP_SSL", "false").lower() == "true"
+    if not (SENDGRID_API_KEY and FEEDBACK_MAIL_TO and SENDGRID_FROM):
+        return False
 
     subject = "GrowDoctor Feedback"
-    body = (
+    content = (
         "Neues Feedback\n\n"
         f"ts_utc: {payload.get('ts_utc','')}\n"
         f"client_id: {payload.get('client_id','')}\n"
@@ -364,27 +368,25 @@ def _send_feedback_mail(payload: Dict[str, Any]) -> bool:
         f"{payload.get('message','')}\n"
     )
 
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = SMTP_FROM
-    msg["To"] = FEEDBACK_MAIL_TO
-    msg.set_content(body)
+    r = requests.post(
+        "https://api.sendgrid.com/v3/mail/send",
+        headers={
+            "Authorization": f"Bearer {SENDGRID_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "personalizations": [{"to": [{"email": FEEDBACK_MAIL_TO}]}],
+            "from": {"email": SENDGRID_FROM, "name": "GrowDoctor"},
+            "subject": subject,
+            "content": [{"type": "text/plain", "value": content}],
+        },
+        timeout=20,
+    )
 
-    if smtp_ssl:
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-            server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
-    else:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-            server.ehlo()
-            if smtp_tls:
-                server.starttls()
-                server.ehlo()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
+    if 200 <= r.status_code < 300:
+        return True
 
-    return True
-
+    raise RuntimeError(f"sendgrid_failed: {r.status_code} {r.text[:300]}")
 
 
 # -----------------------------
@@ -429,7 +431,7 @@ async def feedback(
     except Exception as e:
         return {"ok": False, "stored": False, "mail_sent": False, "error": f"store_failed: {e}"}
 
-    # 2) Mail (essentiell) – aber nur wenn ENV vollständig gesetzt
+    # 2) Mail (SendGrid) – loggt Fehler ins Render Log
     try:
         mail_sent = _send_feedback_mail(payload)
     except Exception as e:
@@ -439,7 +441,6 @@ async def feedback(
             (FEEDBACK_DIR / f"{ts}_{safe_id}.mail_error.txt").write_text(repr(e), encoding="utf-8")
         except Exception:
             pass
-
 
     return {"ok": True, "stored": stored, "mail_sent": mail_sent}
 

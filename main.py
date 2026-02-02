@@ -175,14 +175,22 @@ def clamp_int(v: Any, lo: int, hi: int, default: int) -> int:
         return default
 
 
-def compute_ampel(wahrscheinlichkeit: int, ist_unsicher: bool) -> str:
+def compute_ampel(wahrscheinlichkeit: int, ist_unsicher: bool, duengen_erlaubt: bool) -> str:
+    # Unsicherheit hat immer Vorrang
     if ist_unsicher:
         return "gelb"
+
+    # Wenn Düngen gesperrt ist, darf die Ampel niemals grün sein
+    if not duengen_erlaubt:
+        return "gelb"
+
+    # Normale Bewertung nach Wahrscheinlichkeit
     if wahrscheinlichkeit >= 70:
         return "gruen"
     if wahrscheinlichkeit >= 40:
         return "gelb"
     return "rot"
+
 
 
 def build_system_prompt() -> str:
@@ -271,7 +279,12 @@ def normalize_result(raw: Dict[str, Any]) -> Dict[str, Any]:
         "profi_empfohlen": bool(raw.get("profi_empfohlen", False)),
         "profi_grund": ensure_str(raw.get("profi_grund")),
     }
-    result["ampel"] = compute_ampel(result["wahrscheinlichkeit"], result["ist_unsicher"])
+    result["ampel"] = compute_ampel(
+    result["wahrscheinlichkeit"],
+    result["ist_unsicher"],
+    result["duengen_erlaubt"],
+)
+
     return result
 
 

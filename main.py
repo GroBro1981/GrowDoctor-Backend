@@ -204,6 +204,17 @@ def build_system_prompt() -> str:
         "- Older/lower leaves: more likely mobile nutrient issues (N, P, K, Mg) or senescence.\n"
         "- Newer/top growth: more likely immobile issues (Ca, Fe, S, B, Mn, Zn) or pH/lockout.\n"
         "If multiple symptoms conflict, prioritize root-zone/pH/EC/lockout explanation.\n"
+        "\n"
+        "Priority rule (MUST): Overfertilization / EC stress before deficiency.\n"
+        "- If leaves are very dark green or glossy, show clawing (\"eagle claw\"), and/or have burned tips,\n"
+        "  prioritize overfertilization / toxicity / high-EC root stress.\n"
+        "- Even if yellowing/necrosis is visible, do NOT make a deficiency the primary diagnosis in this case.\n"
+        "\n"
+        "Priority rule (MUST): Environmental stress before deficiency when morphology fits.\n"
+        "- If leaves show taco/canoe curl, upward praying with edge burn, crispy margins, or obvious heat/light/wind patterns,\n"
+        "  prioritize heat/light/VPD/windburn over nutrient deficiency.\n"
+        "\n"
+
     )
 
 
@@ -271,9 +282,6 @@ def legal_block(lang: str) -> Dict[str, str]:
         "privacy_title": t(lang, "privacy_title"),
         "privacy_body": t(lang, "privacy_body"),
     }
-
-
-
 
 
 def cannabis_check(data_url: str) -> dict:
@@ -439,8 +447,6 @@ async def diagnose(
         raise HTTPException(status_code=400, detail=t(lang_final, "age_not_confirmed"))
 
     data = await image.read()
-
-    
 
     if not data:
         raise HTTPException(status_code=400, detail="No image data")

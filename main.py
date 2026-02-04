@@ -1,367 +1,229 @@
 import os
-import base64
-import json
+import time
+import secrets
+from datetime import datetime
+from fastapi import FastAPI, Form, Depends, Header, HTTPException
+from fastapi.responses import JSONResponse
+import requests
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from fastapi.middleware.cors import CORSMiddleware
-from openai import OpenAI
+from passlib.context import CryptContext
+import jwt
 
-# --------------------------------------------------
-# 🔑 OpenAI-Client
-# --------------------------------------------------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError(
-        "OPENAI_API_KEY ist nicht gesetzt. Bitte als Environment Variable hinterlegen."
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
+
+app = FastAPI()
+
+# =====================================================
+# Helpers (Response)
+# =====================================================
+
+def ok(data=None):
+    return {"ok": True, "data": data or {}}
+
+def err(code, message=None):
+    r = {"ok": False, "error_code": code}
+    if message:
+        r["message"] = message
+    return r
+
+# =====================================================
+# ENV
+# =====================================================
+
+JWT_SECRET = os.getenv("JWT_SECRET", "")
+JWT_ALG = "HS256"
+
+APP_BASE_URL = os.getenv("APP_BASE_URL", "")
+
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY") or os.getenv("SendGridAPIKey")
+SENDGRID_FROM = os.getenv("SENDGRID_FROM") or os.getenv("SendGripFrom")
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    DATABASE_URL = "sqlite:///./auth.db"
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# =====================================================
+# DB Init
+# =====================================================
+
+def init_db():
+    with engine.begin() as conn:
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            email_verified INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        """))
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS email_verification_tokens (
+            token TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
+        """))
+
+@app.on_event("startup")
+def startup():
+    init_db()
+
+# =====================================================
+# Auth Utils
+# =====================================================
+
+def hash_pw(pw):
+    return pwd_context.hash(pw)
+
+def verify_pw(pw, pw_hash):
+    return pwd_context.verify(pw, pw_hash)
+
+def make_jwt(user_id, email, email_verified, remember):
+    if not JWT_SECRET:
+        raise RuntimeError("JWT_SECRET missing")
+    ttl = 60 * 60 * 24 * (30 if remember else 1)
+    payload = {
+        "sub": user_id,
+        "email": email,
+        "email_verified": bool(email_verified),
+        "exp": int(time.time()) + ttl
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+
+def decode_jwt(token):
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+    except Exception:
+        return None
+
+def send_verify_mail(email, link):
+    if not SENDGRID_API_KEY or not SENDGRID_FROM:
+        return False
+    payload = {
+        "personalizations": [{"to": [{"email": email}]}],
+        "from": {"email": SENDGRID_FROM},
+        "subject": "GrowDoctor – E-Mail bestätigen",
+        "content": [{"type": "text/plain", "value": f"Bitte bestätigen:\n{link}"}]
+    }
+    r = requests.post(
+        "https://api.sendgrid.com/v3/mail/send",
+        headers={
+            "Authorization": f"Bearer {SENDGRID_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json=payload,
+        timeout=10
     )
+    return 200 <= r.status_code < 300
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# =====================================================
+# Auth Dependencies
+# =====================================================
 
-# --------------------------------------------------
-# 🌐 FastAPI-App
-# --------------------------------------------------
-app = FastAPI(
-    title="Canalyzer Backend",
-    description="Bildbasierte Cannabis-Diagnose-API (Diagnose + Reifegrad)",
-    version="2.0.0",
-)
+def get_user(authorization: str | None = Header(default=None)):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    token = authorization.split(" ", 1)[1]
+    return decode_jwt(token)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # für Entwicklung ok, später einschränken
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def require_user(user=Depends(get_user)):
+    if not user:
+        return err("AUTH_REQUIRED")
+    return user
 
+def require_verified(user=Depends(require_user)):
+    if isinstance(user, dict) and not user.get("email_verified"):
+        return err("EMAIL_NOT_VERIFIED")
+    return user
 
-@app.get("/")
-def root():
-    return {"status": "ok", "message": "Canalyzer Backend läuft 😎"}
+# =====================================================
+# Auth Routes
+# =====================================================
 
+@app.post("/auth/register")
+def register(email: str = Form(...), password: str = Form(...)):
+    email = email.lower().strip()
+    if "@" not in email or len(password) < 8:
+        return err("INVALID_INPUT")
 
-# --------------------------------------------------
-# 🧾 Prompts
-# --------------------------------------------------
+    uid = secrets.token_hex(16)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO users (id, email, password_hash, email_verified, created_at)
+                VALUES (:id, :email, :pw, 0, :ts)
+            """), {"id": uid, "email": email, "pw": hash_pw(password), "ts": datetime.utcnow().isoformat()})
+    except IntegrityError:
+        return err("EMAIL_EXISTS")
 
-DIAGNOSIS_PROMPT = """
-Du bist ein sehr erfahrener Cannabis-Pflanzenarzt.
+    token = secrets.token_urlsafe(32)
+    expires = int(time.time()) + 86400
 
-Du bekommst ein Foto einer Cannabis-Pflanze (Indoor oder Outdoor).
-Deine Aufgabe: Erkenne das wichtigste Problem (NUR EIN Hauptproblem auswählen), z.B.:
-- Nährstoffmangel
-- Nährstoffüberschuss
-- Schädlingsbefall
-- Pilzbefall
-- Umweltstress
-- oder: kein akutes Problem erkennbar
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO email_verification_tokens (token, user_id, expires_at)
+            VALUES (:t, :u, :e)
+        """), {"t": token, "u": uid, "e": expires})
 
-WICHTIG – Unterschied zwischen TRICHOMEN und SCHIMMEL:
+    if not APP_BASE_URL:
+        return err("APP_BASE_URL_MISSING")
 
-- Trichome:
-  - kleine, glitzernde Harzdrüsen (wie Frost / Kristalle)
-  - sitzen dicht auf Blüten und Zuckerblättern
-  - wirken wie viele kleine Punkte oder Pilzstiele mit Köpfen
-  - können weiß, milchig oder bernsteinfarben sein
-  - können auf Fotos wie „zuckerig bestäubt“ oder wie Mehltau wirken, sind aber NORMAL
+    link = f"{APP_BASE_URL}/auth/verify-email?token={token}"
+    if not send_verify_mail(email, link):
+        return err("MAIL_FAILED")
 
-- Echter Schimmel / Mehltau:
-  - wirkt flauschig, wattig, wolkig oder pulvrig
-  - überzieht die Oberfläche wie ein Belag
-  - verdeckt teilweise die Pflanzenstruktur
-  - die Flächen sehen ungleichmäßig, „angefressen“ oder verrottet aus
+    return ok({"message": "Bitte E-Mail bestätigen"})
 
-REGEL:
-- Wenn die weißen Strukturen wie dichte Trichome wirken (kristall-artig, frostig, viele Punkte),
-  dann DARFST du NICHT „Schimmel“ diagnostizieren.
-- Nur wenn ganz klar eine flauschige, wattige oder pulvrige Struktur zu sehen ist,
-  darfst du „Pilzbefall / Schimmel“ als Hauptproblem wählen.
-- Wenn du unsicher bist, ob es Schimmel oder nur viele Trichome sind,
-  entscheide dich NICHT für Schimmel. Schreibe in die Beschreibung,
-  dass die Trichome möglicherweise nur sehr dicht stehen.
+@app.get("/auth/verify-email")
+def verify_email(token: str):
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT user_id, expires_at FROM email_verification_tokens WHERE token = :t
+        """), {"t": token}).mappings().first()
 
-Bildqualität:
-- Wenn das Bild extrem unscharf ist oder nur ein winziger Ausschnitt gezeigt wird,
-  darfst du die Bildqualität kritisieren und eine niedrige Wahrscheinlichkeit setzen.
-- Wenn Pflanze / Blätter / Blüten aber gut erkennbar sind, behandle die Bildqualität als ausreichend
-  und gib eine normale Diagnose.
+    if not row:
+        return err("INVALID_TOKEN")
+    if row["expires_at"] < int(time.time()):
+        return err("TOKEN_EXPIRED")
 
-Wenn du wirklich kein klares Problem erkennen kannst:
-- Setze als Hauptproblem z.B. „kein akutes Problem erkennbar“
-- Kategorie: „kein_problem“
-- niedrige Wahrscheinlichkeit
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE users SET email_verified = 1 WHERE id = :u"), {"u": row["user_id"]})
+        conn.execute(text("DELETE FROM email_verification_tokens WHERE token = :t"), {"t": token})
 
-ANTWORTE IMMER als gültiges JSON mit GENAU diesem Schema:
+    return ok({"message": "E-Mail bestätigt"})
 
-{
-  "ist_cannabis": true/false,
-  "hauptproblem": "kurzer Titel des wichtigsten Problems oder 'kein akutes Problem erkennbar'",
-  "kategorie": "mangel|überschuss|schädling|pilz|stress|unbekannt|kein_problem",
-  "beschreibung": "Was ist auf dem Bild zu sehen und warum kommst du zu dieser Diagnose?",
-  "wahrscheinlichkeit": 0-100,
-  "schweregrad": "leicht|mittel|stark|kein_problem",
-  "stadium": "keimling|wachstum|blüte|egal",
-  "betroffene_teile": ["z.B. untere_blaetter", "obere_triebe"],
-  "dringlichkeit": "niedrig|mittel|hoch|sofort_handeln",
-  "empfohlene_kontrolle_in_tagen": 0-30,
-  "alternativen": [
-    {"problem": "anderes mögliches Problem", "wahrscheinlichkeit": 0-100}
-  ],
-  "sofort_massnahmen": ["konkreter Schritt 1", "konkreter Schritt 2"],
-  "vorbeugung": ["konkreter Tipp 1", "konkreter Tipp 2"],
-  "bildqualitaet_score": 0-100,
-  "hinweis_bildqualitaet": "Hinweis zur Qualität des Fotos und ggf. Verbesserungsvorschläge",
-  "foto_empfehlungen": [
-    "konkrete Empfehlungen für weitere Fotos (z.B. Blattunterseite, Makroaufnahme)"
-  ]
-}
-"""
+@app.post("/auth/login")
+def login(email: str = Form(...), password: str = Form(...), remember_me: bool = Form(False)):
+    email = email.lower().strip()
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT id, email, password_hash, email_verified FROM users WHERE email = :e
+        """), {"e": email}).mappings().first()
 
-RIPENESS_PROMPT = """
-Du bist ein hochspezialisierter Cannabis-Ernteassistent.
+    if not row or not verify_pw(password, row["password_hash"]):
+        return err("INVALID_CREDENTIALS")
+    if not row["email_verified"]:
+        return err("EMAIL_NOT_VERIFIED")
 
-DU BEURTEILST NUR DEN REIFEGRAD DER BLÜTE ANHAND DER TRICHOME.
-Du sollst KEINE Krankheiten, keinen Schimmel und keine Nährstoffmängel diagnostizieren.
+    token = make_jwt(row["id"], row["email"], row["email_verified"], remember_me)
+    return ok({"access_token": token, "token_type": "bearer"})
 
-Du bekommst ein MAKRO-Foto von Trichomen auf einer Cannabis-Blüte.
+@app.get("/auth/me")
+def me(user=Depends(require_user)):
+    if isinstance(user, dict) and not user.get("ok", True):
+        return user
+    return ok({"email": user["email"], "email_verified": user["email_verified"]})
 
-WICHTIG:
-- Trichome = Harzdrüsen / kleine glitzernde „Pilze“ auf Blüte und Blättern.
-- Sie können sehr dicht stehen und auf Fotos wie Mehltau oder Schimmel wirken – sind aber NORMAL.
-- Du darfst in diesem Modus NIEMALS „Schimmel“ oder „Pilzbefall“ diagnostizieren.
-- Auch wenn die Trichome wie weißer Belag aussehen: behandle sie als Trichome, solange keine typische
-  flauschige, wattige oder verrottete Struktur zu sehen ist.
+# =====================================================
+# Health
+# =====================================================
 
-Deine Aufgaben:
-
-1. Schätze die Verteilung der Trichome:
-   - Anteil KLAR (%) 0–100
-   - Anteil MILCHIG (%) 0–100
-   - Anteil BERNSTEIN (%) 0–100
-   Die Summe darf ungefähr 100 % ergeben.
-
-2. Bestimme eine Reifegrad-Stufe:
-   - "zu früh"    → überwiegend klare Trichome
-   - "optimal"    → überwiegend milchige Trichome
-   - "spät"       → sehr viele bernsteinfarbene Trichome
-
-3. Empfohlene Tage bis Ernte:
-   - Wenn schon optimal: 0 Tage.
-   - Wenn noch zu früh: positive Zahl (z.B. 5 = noch ca. 5 Tage bis optimal).
-   - Wenn deutlich überreif: negative Zahl (z.B. -3 = etwa 3 Tage über dem optimalen Zeitpunkt).
-
-4. Empfehlung:
-   - "weiter reifen lassen"
-   - "jetzt ernten"
-   - "schnellstmöglich ernten"
-
-5. Kurzbeschreibung:
-   - Erkläre in 2–5 Sätzen, wie die Trichome ungefähr verteilt sind
-     und warum du zu diesem Reifegrad kommst.
-
-Wenn das Foto extrem unscharf ist oder man kaum Trichome erkennt:
-- Gib eine sehr vorsichtige Einschätzung ab.
-- Setze "empfohlene_tage_bis_ernte" auf 0.
-- Setze "reifegrad_stufe" auf "zu früh".
-- Empfehlung: "weiter reifen lassen".
-- Erkläre in der Beschreibung, dass das Foto für eine genaue Beurteilung ungeeignet ist
-  und dass der Nutzer ein schärferes Makro mit Fokus auf den Trichomen machen soll.
-
-ANTWORTE IMMER als gültiges JSON mit GENAU DIESEM SCHEMA:
-
-{
-  "reifegrad_stufe": "zu früh" | "optimal" | "spät",
-  "beschreibung": "kurze Erklärung, was du an den Trichomen erkennst",
-  "empfohlene_tage_bis_ernte": ganze Zahl (negativ, 0 oder positiv),
-  "empfehlung": "weiter reifen lassen" | "jetzt ernten" | "schnellstmöglich ernten",
-  "trichom_anteile": {
-    "klar": ganze Zahl (0-100),
-    "milchig": ganze Zahl (0-100),
-    "bernstein": ganze Zahl (0-100)
-  }
-}
-"""
-
-
-# --------------------------------------------------
-# 🧠 Hilfsfunktion: OpenAI-Call (gpt-4.1-mini)
-# --------------------------------------------------
-
-
-def _call_openai_json(system_prompt: str, data_url: str, user_text: str) -> dict:
-  try:
-      response = client.chat.completions.create(
-          model="gpt-4.1-mini",
-          messages=[
-              {"role": "system", "content": system_prompt},
-              {
-                  "role": "user",
-                  "content": [
-                      {"type": "text", "text": user_text},
-                      {"type": "image_url", "image_url": {"url": data_url}},
-                  ],
-              },
-          ],
-          response_format={"type": "json_object"},
-          max_tokens=900,
-          temperature=0.1,
-      )
-  except Exception as e:
-      msg = str(e)
-      if "rate_limit" in msg or "rate_limit_exceeded" in msg:
-          raise HTTPException(
-              status_code=429,
-              detail="OpenAI-Ratelimit erreicht – bitte später erneut versuchen.",
-          )
-      raise HTTPException(
-          status_code=500,
-          detail=f"Fehler bei der Anfrage an OpenAI: {e}",
-      )
-
-  raw = response.choices[0].message.content
-  try:
-      return json.loads(raw)
-  except json.JSONDecodeError:
-      raise HTTPException(
-          status_code=500,
-          detail="OpenAI hat kein gültiges JSON zurückgegeben.",
-      )
-
-
-# --------------------------------------------------
-# 📸 ENDPOINT 1: Allgemeine Diagnose
-# --------------------------------------------------
-
-
-@app.post("/diagnose")
-async def diagnose(image: UploadFile = File(...)):
-    """
-    Erkennt Probleme wie Mängel, Schädlinge, Stress etc.
-    """
-
-    if image.content_type not in ("image/jpeg", "image/png"):
-        raise HTTPException(status_code=400, detail="Nur JPG und PNG sind erlaubt.")
-
-    img_bytes = await image.read()
-    img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-    data_url = f"data:{image.content_type};base64,{img_base64}"
-
-    user_text = (
-        "Analysiere dieses Bild der Cannabis-Pflanze und gib nur das JSON im Schema zurück."
-    )
-
-    result = _call_openai_json(
-        DIAGNOSIS_PROMPT,
-        data_url,
-        user_text,
-    )
-
-    # Alternativen filtern: alles < 45 % raus
-    alternativen = result.get("alternativen") or []
-    gefiltert = []
-    for alt in alternativen:
-        try:
-            w = alt.get("wahrscheinlichkeit", 0)
-            if isinstance(w, (int, float)) and w >= 45:
-                gefiltert.append(alt)
-        except Exception:
-            continue
-    result["alternativen"] = gefiltert
-
-    return result
-
-
-# --------------------------------------------------
-# 🌼 ENDPOINT 2: Reifegrad / Trichome
-# --------------------------------------------------
-
-
-@app.post("/ripeness")
-async def ripeness(
-    image: UploadFile = File(...),
-    preference: str = Form("balanced"),  # "energetic" | "balanced" | "couchlock"
-):
-    """
-    Bewertet NUR den Reifegrad der Blüte anhand der Trichome.
-    """
-
-    if image.content_type not in ("image/jpeg", "image/png"):
-        raise HTTPException(status_code=400, detail="Nur JPG und PNG sind erlaubt.")
-
-    img_bytes = await image.read()
-    img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-    data_url = f"data:{image.content_type};base64,{img_base64}"
-
-    # kleinen Text je nach Wunschwirkung bauen
-    if preference == "energetic":
-        pref_text = (
-            "Der Nutzer wünscht eine eher ENERGETISCHE, aktive Wirkung "
-            "(mehr klare/milchige Trichome, weniger bernsteinfarben). "
-            "Plane die Ernte eher FRÜHER im optimalen Fenster."
-        )
-    elif preference == "couchlock":
-        pref_text = (
-            "Der Nutzer wünscht eine starke, SEDIERENDE Couchlock-Wirkung "
-            "(viele bernsteinfarbene Trichome). "
-            "Plane die Ernte eher SPÄTER im optimalen Fenster."
-        )
-    else:
-        pref_text = (
-            "Der Nutzer wünscht eine AUSGEGLICHENE Wirkung "
-            "(Mischung aus milchigen und etwas bernsteinfarbenen Trichomen)."
-        )
-
-    user_text = (
-        "Analysiere NUR den Reifegrad der Blüte anhand der Trichome. "
-        "Berücksichtige folgende Wunschwirkung des Nutzers: "
-        f"{pref_text}"
-    )
-
-    result = _call_openai_json(
-        RIPENESS_PROMPT,
-        data_url,
-        user_text,
-    )
-
-    # Sanity-Checks & Defaults
-    stage = result.get("reifegrad_stufe")
-    if not isinstance(stage, str) or not stage.strip():
-        stage = "zu früh"
-    result["reifegrad_stufe"] = stage.strip()
-
-    days = result.get("empfohlene_tage_bis_ernte", 0)
-    if not isinstance(days, int):
-        try:
-            days = int(days)
-        except Exception:
-            days = 0
-    result["empfohlene_tage_bis_ernte"] = days
-
-    rec = result.get("empfehlung")
-    if not isinstance(rec, str) or not rec.strip():
-        if days > 1:
-            rec = "weiter reifen lassen"
-        elif days < -1:
-            rec = "schnellstmöglich ernten"
-        else:
-            rec = "jetzt ernten"
-    result["empfehlung"] = rec.strip()
-
-    ta = result.get("trichom_anteile") or {}
-    safe_ta = {}
-    for key in ["klar", "milchig", "bernstein"]:
-        val = ta.get(key, 0)
-        if not isinstance(val, int):
-            try:
-                val = int(val)
-            except Exception:
-                val = 0
-        if val < 0:
-            val = 0
-        if val > 100:
-            val = 100
-        safe_ta[key] = val
-    result["trichom_anteile"] = safe_ta
-
-    return result
-
+@app.get("/health")
+def health():
+    return {"ok": True}
